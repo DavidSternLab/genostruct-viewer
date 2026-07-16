@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Genome · Gene · Protein · Structure viewer</title>
+<style>/*__MOLSTAR_CSS__*/</style>
+<style>/*__APP_CSS__*/</style>
+</head>
+<body>
+<div id="topbar">
+  <h1>Genome · Gene · Protein · Structure</h1>
+  <select id="transcriptSelect" title="Choose a transcript with a structure model"></select>
+  <button id="exportBtn" title="Download a GenBank feature table for this transcript's region">Export GenBank</button>
+  <span class="spacer"></span>
+  <span id="dsLabel"></span>
+</div>
+<div id="meta">Loading…</div>
+
+<div id="layout">
+  <div id="structPanel" class="panel">
+    <div class="panel-title">Protein structure (Mol*) — colored by structural element
+      <span id="structStatus" class="hint" style="color:var(--warn)"></span>
+    </div>
+    <div id="molstar"></div>
+  </div>
+  <div id="seqPanel" class="panel">
+    <div class="panel-title">Protein sequence — residues in helices/strands are colored
+      <span class="zoomctl">
+        <button id="seqZoomOut" title="Zoom out">&minus;</button>
+        <button id="seqZoomReset" title="Reset zoom">reset</button>
+        <button id="seqZoomIn" title="Zoom in">&plus;</button>
+        <span class="hint">(or Ctrl/&#8984;+scroll over sequence)</span>
+      </span>
+    </div>
+    <div id="seqTrack"></div>
+  </div>
+  <div id="genomePanel" class="panel">
+    <div class="panel-title">Genome track — exons, CDS, and the genomic bases encoding each structural element
+      <span class="hint">scroll to zoom &middot; drag to pan &middot; double-click to reset</span>
+    </div>
+    <div id="genomeTrack"></div>
+  </div>
+  <div id="legendPanel" class="panel">
+    <div class="panel-title">Structural elements (click to focus in 3D; hover to link across panels)</div>
+    <div id="legend"></div>
+  </div>
+</div>
+
+<div id="tooltip"></div>
+
+<!-- embedded data (gzip + base64) -->
+<script id="index-json" type="application/octet-stream">__INDEX_B64__</script>
+<script>/*__PAKO_JS__*/</script>
+<script>window.EMBED = __EMBED_JSON__;</script>
+<script>/*__MOLSTAR_JS__*/</script>
+<script>/*__APP_JS__*/</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+# Input data (user-provided; large, not part of the tool)
+genome/
+gff/
+pep/
+pdbs/
+*.fa
+*.fasta
+*.gff3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+
+# OS
+.DS_Store
