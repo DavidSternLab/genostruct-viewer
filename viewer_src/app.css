@@ -12,6 +12,8 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
 select,button{background:var(--panel);color:var(--ink);border:1px solid var(--edge);
   border-radius:6px;padding:6px 10px;font-size:13px;cursor:pointer}
 select{min-width:340px}
+#transcriptSearch{min-width:230px;font-family:ui-monospace,Menlo,monospace}
+#transcriptSearch::placeholder{color:#6f8296;font-family:-apple-system,sans-serif}
 button#exportBtn{background:var(--accent);color:#04121f;border-color:var(--accent);font-weight:600}
 button#exportBtn:hover{filter:brightness(1.08)}
 #meta{padding:8px 16px;color:var(--muted);background:var(--panel);border-bottom:1px solid var(--edge);font-size:13px}

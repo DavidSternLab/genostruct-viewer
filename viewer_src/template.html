@@ -10,7 +10,10 @@
 <body>
 <div id="topbar">
   <h1>Genome · Gene · Protein · Structure</h1>
-  <select id="transcriptSelect" title="Choose a transcript with a structure model"></select>
+  <input id="transcriptSearch" list="transcriptOptions" placeholder="Search — type a gene number…"
+         autocomplete="off" spellcheck="false" title="Type part of a transcript ID (e.g. 113516) and pick from the list"/>
+  <datalist id="transcriptOptions"></datalist>
+  <select id="transcriptSelect" title="Choose a transcript (numerically ordered)"></select>
   <button id="exportBtn" title="Download a GenBank feature table for this transcript's region">Export GenBank</button>
   <span class="spacer"></span>
   <span id="dsLabel"></span>

@@ -439,6 +439,8 @@ function hideTip() { document.getElementById("tooltip").style.display = "none"; 
 async function selectTranscript(tid) {
   STATE.rec = loadRecord(tid);
   STATE.gview = null;              // reset zoom/pan for new locus
+  var selEl = document.getElementById("transcriptSelect");
+  if (selEl && selEl.value !== tid) selEl.value = tid;
   document.getElementById("meta").innerHTML = metaHTML(STATE.rec);
   renderSequence(); renderGenome(); renderLegend();
   await loadStructure(tid);
@@ -450,15 +452,76 @@ function metaHTML(rec) {
     rec.n_helix + " helices, " + rec.n_strand + " strands" +
     (rec.cds_translation_ok ? " &middot; <span class='ok'>CDS&#10003;</span>" : " &middot; <span class='warn'>CDS mismatch</span>");
 }
+function transcriptSortKey(tid) {
+  // numeric-aware key: split into runs of digits / non-digits so g113516.t1-00001
+  // orders by gene number, then isoform, naturally (g9 before g100).
+  var parts = String(tid).match(/\d+|\D+/g) || [tid];
+  return parts.map(function (p) { return /^\d+$/.test(p) ? p.padStart(12, "0") : p; }).join("");
+}
+function optionLabel(t) {
+  return t.transcript_id + "  [" + t.scaffold + ", " + t.n_helix + "H/" + t.n_strand + "S, " + t.protein_length + "aa]";
+}
 function populateSelector() {
   var sel = document.getElementById("transcriptSelect");
+  var search = document.getElementById("transcriptSearch");
+  var dlist = document.getElementById("transcriptOptions");
+  // sort transcripts numerically and keep this order everywhere
+  STATE.index.transcripts.sort(function (a, b) {
+    var ka = transcriptSortKey(a.transcript_id), kb = transcriptSortKey(b.transcript_id);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+  sel.innerHTML = "";
   STATE.index.transcripts.forEach(function (t) {
     var o = document.createElement("option");
     o.value = t.transcript_id;
-    o.textContent = t.transcript_id + "  [" + t.scaffold + ", " + t.n_helix + "H/" + t.n_strand + "S, " + t.protein_length + "aa]";
+    o.textContent = optionLabel(t);
     sel.appendChild(o);
   });
-  sel.addEventListener("change", function () { selectTranscript(sel.value); });
+  sel.addEventListener("change", function () {
+    selectTranscript(sel.value);
+    if (search) search.value = sel.value;
+  });
+
+  // ---- type-ahead search box (native datalist) ----
+  if (!search || !dlist) return;
+  function rebuildDatalist(q) {
+    q = (q || "").toLowerCase();
+    dlist.innerHTML = "";
+    var shown = 0;
+    for (var i = 0; i < STATE.index.transcripts.length && shown < 60; i++) {
+      var t = STATE.index.transcripts[i];
+      if (!q || t.transcript_id.toLowerCase().indexOf(q) !== -1) {
+        var o = document.createElement("option");
+        o.value = t.transcript_id;
+        o.label = optionLabel(t);
+        dlist.appendChild(o); shown++;
+      }
+    }
+  }
+  rebuildDatalist("");
+  var idset = {};
+  STATE.index.transcripts.forEach(function (t) { idset[t.transcript_id] = true; });
+  function tryGo(v) {
+    v = (v || "").trim();
+    if (idset[v]) { sel.value = v; selectTranscript(v); return true; }
+    // if a unique prefix/substring match exists, jump to it
+    var matches = STATE.index.transcripts.filter(function (t) {
+      return t.transcript_id.toLowerCase().indexOf(v.toLowerCase()) !== -1;
+    });
+    if (v && matches.length === 1) {
+      sel.value = matches[0].transcript_id; search.value = matches[0].transcript_id;
+      selectTranscript(matches[0].transcript_id); return true;
+    }
+    return false;
+  }
+  search.addEventListener("input", function () {
+    rebuildDatalist(search.value);
+    tryGo(search.value);       // picking a datalist entry fires 'input' with the full id
+  });
+  search.addEventListener("change", function () { tryGo(search.value); });
+  search.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") { ev.preventDefault(); tryGo(search.value); }
+  });
 }
 async function init() {
   STATE.index = JSON.parse(decodeAsset("index-json"));
@@ -488,6 +551,8 @@ async function init() {
   }, { passive: false });
   var first = STATE.index.transcripts[0].transcript_id;
   document.getElementById("transcriptSelect").value = first;
+  var searchBox = document.getElementById("transcriptSearch");
+  if (searchBox) searchBox.value = first;
   await selectTranscript(first);
 }
 
