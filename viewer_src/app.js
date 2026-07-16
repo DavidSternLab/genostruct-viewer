@@ -16,6 +16,8 @@ var STATE = {
   structureRef: null,
   colorThemeName: "genostruct-elements",
   selected: null,
+  dimElem: null,     // element to focus in 3D (rest dimmed)
+  hoverElem: null,   // element hovered (brief 3D emphasis)
 };
 
 /* ---- embedded-asset decoding (gzip + base64, inflated with pako) ------- */
@@ -34,6 +36,13 @@ function loadPDB(tid) { return inflateStr(EMBED.pdb[tid]); }
 
 /* ---- color helpers ---------------------------------------------------- */
 function hexToInt(hex) { return parseInt(hex.replace('#', ''), 16); }
+// blend an integer color toward light grey by factor f in [0,1] (1 = full grey)
+function dimInt(intColor, f) {
+  var r = (intColor >> 16) & 255, g = (intColor >> 8) & 255, b = intColor & 255;
+  var G = 224; // light grey target
+  r = Math.round(r + (G - r) * f); g = Math.round(g + (G - g) * f); b = Math.round(b + (G - b) * f);
+  return (r << 16) | (g << 8) | b;
+}
 
 /* =====================================================================
    MOL*  — structure panel + custom per-residue color theme
@@ -54,9 +63,10 @@ function registerElementTheme(plugin) {
     category: "Custom",
     factory: function (ctx, props) {
       function colorFor(location) {
-        var recColors = STATE.rec ? STATE.rec.residue_color : null;
+        var rec = STATE.rec;
+        var recColors = rec ? rec.residue_color : null;
         if (!recColors) return DEFAULT;
-        var off = (STATE.rec.model && STATE.rec.model.offset) || 0;
+        var off = (rec.model && rec.model.offset) || 0;
         var unit = location.unit, el = location.element;
         if (!unit || el === undefined || el === null) return DEFAULT;
         var residueIndex;
@@ -65,11 +75,22 @@ function registerElementTheme(plugin) {
         if (residueIndex === undefined || residueIndex === null) return DEFAULT;
         // residueIndex is 0-based within model; map to full protein residue.
         var protRes = off + residueIndex;
+        var base = DEFAULT;
         if (protRes >= 0 && protRes < recColors.length) {
           var c = recColors[protRes];
-          if (c) return hexToInt(c);
+          if (c) base = hexToInt(c);
         }
-        return DEFAULT;
+        // focus/dim: when an element is focused, keep its residues vivid and
+        // fade everything else toward light grey. A hovered element (no focus)
+        // gets a lighter emphasis without dimming the rest.
+        var focus = STATE.dimElem;
+        if (focus) {
+          var reElem = rec.residue_element;
+          var thisElem = (reElem && protRes >= 0 && protRes < reElem.length) ? reElem[protRes] : null;
+          if (thisElem === focus) return base;              // focused element: full color
+          return dimInt(base, base === DEFAULT ? 0.55 : 0.82); // everything else: dimmed
+        }
+        return base;
       }
       return {
         factory: provider.factory,
@@ -181,6 +202,21 @@ function genomeExtent() {
 function resetGenomeView() {
   var ext = genomeExtent();
   STATE.gview = { start: ext[0], end: ext[1] };
+  renderGenome();
+}
+// Zoom the genome track to a window enclosing the selected element's genomic
+// ranges, with padding, clamped to the locus extent.
+function zoomGenomeToElement(elemId) {
+  var rec = STATE.rec;
+  var el = rec.elements.filter(function (e) { return e.id === elemId; })[0];
+  if (!el || !el.genome_ranges || !el.genome_ranges.length) return;
+  var lo = Infinity, hi = -Infinity;
+  el.genome_ranges.forEach(function (gr) { if (gr[0] < lo) lo = gr[0]; if (gr[1] > hi) hi = gr[1]; });
+  var ext = genomeExtent();
+  var span = hi - lo, pad = Math.max(30, span * 0.5);   // at least 30 bp of context
+  var s = Math.max(ext[0], lo - pad), e = Math.min(ext[1], hi + pad);
+  if (e - s < 12) { var mid = (s + e) / 2; s = Math.max(ext[0], mid - 6); e = Math.min(ext[1], mid + 6); }
+  STATE.gview = { start: s, end: e };
   renderGenome();
 }
 function renderGenome() {
@@ -353,58 +389,50 @@ function highlightElement(elemId, on) {
   document.querySelectorAll('#seqTrack .aa[data-elem="' + elemId + '"]').forEach(function (s) { s.classList.toggle("hl", on); });
   document.querySelectorAll('#genomeTrack .sse-genome[data-elem="' + elemId + '"]').forEach(function (r) { r.classList.toggle("hl", on); });
   document.querySelectorAll('#legend .chip[data-elem="' + elemId + '"]').forEach(function (c) { c.classList.toggle("hl", on); });
-  highlight3D(elemId, on);
+  // 3D hover emphasis: only when nothing is focus-locked, briefly dim-focus the
+  // hovered element; restore to the locked focus (or none) on mouse-out.
+  if (!STATE.selected) {
+    STATE.dimElem = on ? elemId : null;
+    recolor3D();
+  }
 }
 function selectElement(elemId) {
   STATE.selected = (STATE.selected === elemId) ? null : elemId;
   document.querySelectorAll(".sel").forEach(function (n) { n.classList.remove("sel"); });
   if (STATE.selected) {
     document.querySelectorAll('[data-elem="' + elemId + '"]').forEach(function (n) { n.classList.add("sel"); });
-    focus3D(elemId);
+    STATE.dimElem = elemId;      // focus in 3D: this element vivid, rest dimmed
+    recolor3D();
+    zoomGenomeToElement(elemId); // auto-zoom the genome track around this element
+  } else {
+    STATE.dimElem = null;
+    recolor3D();
+    resetGenomeView();
   }
+  updateFocusBanner();
 }
-function elementModelRange(elemId) {
-  var rec = STATE.rec;
-  var el = rec.elements.filter(function (e) { return e.id === elemId; })[0];
-  if (!el) return null;
-  var off = (rec.model && rec.model.offset) || 0;
-  // full-protein 1-based prot_start/end -> model auth_seq_id (1-based) = protRes - off
-  return [el.prot_start - off, el.prot_end - off];
+function updateFocusBanner() {
+  var el = document.getElementById("focusInfo");
+  if (!el) return;
+  if (STATE.selected) {
+    var e = STATE.rec.elements.filter(function (x) { return x.id === STATE.selected; })[0];
+    el.textContent = e ? ("Focused " + e.id + " (" + e.kind + ", protein " + e.prot_start + "\u2013" + e.prot_end + ") \u2014 click again to clear") : "";
+  } else { el.textContent = ""; }
 }
-function residueRangeLoci(startAuth, endAuth) {
+// Re-run the color theme so the structure re-colors/dims WITHOUT re-adding the
+// theme (the loci/selection APIs are not exported by the Viewer UMD; recoloring
+// via the registered theme is the reliable path and also drives the dim effect).
+function recolor3D() {
   var plugin = STATE.plugin;
-  var s = plugin.managers.structure.hierarchy.current.structures[0];
-  if (!s || !s.cell || !s.cell.obj) return null;
-  var structure = s.cell.obj.data;
-  var MS = window.molstar;
+  if (!plugin) return;
   try {
-    var sel = MS.Script.getStructureSelection(function (Q) {
-      return Q.struct.generator.atomGroups({
-        "residue-test": Q.core.rel.inRange([
-          Q.struct.atomProperty.macromolecular.auth_seq_id(), startAuth, endAuth]),
-      });
-    }, structure);
-    return MS.StructureSelection.toLociWithSourceUnits(sel);
-  } catch (e) { return null; }
-}
-function highlight3D(elemId, on) {
-  var plugin = STATE.plugin;
-  if (!plugin || !STATE.structureRef) return;
-  try {
-    if (!on) { plugin.managers.interactivity.lociHighlights.clearHighlights(); return; }
-    var rng = elementModelRange(elemId); if (!rng) return;
-    var loci = residueRangeLoci(rng[0], rng[1]);
-    if (loci) plugin.managers.interactivity.lociHighlights.highlightOnly({ loci: loci });
-  } catch (e) {}
-}
-function focus3D(elemId) {
-  var plugin = STATE.plugin;
-  if (!plugin || !STATE.structureRef) return;
-  try {
-    var rng = elementModelRange(elemId); if (!rng) return;
-    var loci = residueRangeLoci(rng[0], rng[1]);
-    if (loci) plugin.managers.camera.focusLoci(loci);
-  } catch (e) {}
+    var comps = plugin.managers.structure.hierarchy.current.structures[0];
+    comps = comps ? comps.components : null;
+    if (!comps || !comps.length) return;
+    plugin.managers.structure.component.updateRepresentationsTheme(comps, {
+      color: STATE.colorThemeName,
+    });
+  } catch (e) { if (window.console) console.warn("recolor3D failed", e); }
 }
 
 /* =====================================================================
@@ -439,6 +467,8 @@ function hideTip() { document.getElementById("tooltip").style.display = "none"; 
 async function selectTranscript(tid) {
   STATE.rec = loadRecord(tid);
   STATE.gview = null;              // reset zoom/pan for new locus
+  STATE.selected = null; STATE.dimElem = null; STATE.hoverElem = null;  // clear focus
+  updateFocusBanner();
   var selEl = document.getElementById("transcriptSelect");
   if (selEl && selEl.value !== tid) selEl.value = tid;
   document.getElementById("meta").innerHTML = metaHTML(STATE.rec);
@@ -533,6 +563,8 @@ async function init() {
   });
   STATE.plugin = viewer.plugin ? viewer.plugin : viewer;
   document.getElementById("exportBtn").addEventListener("click", exportGenBankUI);
+  var evb = document.getElementById("exportViewBtn");
+  if (evb) evb.addEventListener("click", exportViewedRegionUI);
   window.addEventListener("resize", function () { if (STATE.rec) renderGenome(); });
   // once-installed genome pan handlers
   window.addEventListener("mousemove", onWindowMouseMove);
@@ -567,6 +599,81 @@ function exportGenBankUI() {
   a.href = URL.createObjectURL(blob);
   a.download = rec.transcript_id.replace(/[^A-Za-z0-9._-]/g, "_") + ".gb";
   a.click();
+}
+// Export the CURRENTLY-VIEWED genomic window as a GenBank feature table:
+// includes only exon/CDS/element segments that overlap the visible view range.
+function exportViewedRegionUI() {
+  var rec = STATE.rec; if (!rec) return;
+  var ext = genomeExtent();
+  var view = STATE.gview || { start: ext[0], end: ext[1] };
+  var vs = Math.round(Math.max(ext[0], view.start)), ve = Math.round(Math.min(ext[1], view.end));
+  var gb = buildGenBankRegion(rec, vs, ve);
+  var blob = new Blob([gb], { type: "text/plain" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = rec.scaffold + "_" + vs + "-" + ve + ".gb";
+  a.click();
+}
+function overlaps(a, b, s, e) { return a <= e && b >= s; }
+function clipParts(ranges, s, e, origin) {
+  // keep only the portions of each [a,b] range inside [s,e]; coords relative to origin (1-based)
+  var out = [];
+  ranges.forEach(function (r) {
+    var a = Math.max(r[0], s), b = Math.min(r[1], e);
+    if (a <= b) out.push((a - origin + 1) + ".." + (b - origin + 1));
+  });
+  return out;
+}
+function buildGenBankRegion(rec, vs, ve) {
+  var L = ve - vs + 1;
+  var lines = [];
+  lines.push("LOCUS       " + (rec.scaffold.slice(0, 16)).padEnd(16) + " " + L + " bp    DNA     linear   UNK");
+  lines.push("DEFINITION  " + rec.scaffold + ":" + vs + "-" + ve + " viewed region \u2014 " +
+             rec.transcript_id + " structural-feature annotation.");
+  lines.push("ACCESSION   " + rec.scaffold);
+  lines.push("KEYWORDS    genostruct; AlphaFold; secondary structure; viewed region.");
+  lines.push("FEATURES             Location/Qualifiers");
+  lines.push("     source          1.." + L);
+  lines.push("                     /note=\"" + rec.scaffold + ":" + vs + "-" + ve + " (viewed window)\"");
+  // gene box clipped to view
+  var exons = rec.exons.slice().sort(function (a, b) { return a[0] - b[0]; });
+  var gmin = exons[0][0], gmax = exons[exons.length - 1][1];
+  if (overlaps(gmin, gmax, vs, ve)) {
+    var gs = Math.max(gmin, vs) - vs + 1, ge = Math.min(gmax, ve) - vs + 1;
+    lines.push("     gene            " + gs + ".." + ge);
+    lines.push("                     /gene=\"" + rec.gene_id + "\"");
+    if (gmin < vs || gmax > ve) lines.push("                     /note=\"gene extends beyond viewed region\"");
+  }
+  // CDS parts within view
+  var cds = rec.cds.slice().sort(function (a, b) { return a[0] - b[0]; });
+  var cparts = clipParts(cds, vs, ve, vs);
+  if (cparts.length) {
+    var cj = cparts.length > 1 ? "join(" + cparts.join(",") + ")" : cparts[0];
+    if (rec.strand === "-") cj = "complement(" + cj + ")";
+    lines.push("     CDS             " + cj);
+    lines.push("                     /transcript_id=\"" + rec.transcript_id + "\"");
+    lines.push("                     /note=\"CDS segments within viewed region\"");
+  }
+  // structural elements overlapping the view
+  var nEl = 0;
+  rec.elements.forEach(function (el) {
+    var parts = clipParts(el.genome_ranges, vs, ve, vs);
+    if (!parts.length) return;
+    nEl++;
+    var ej = parts.length > 1 ? "join(" + parts.join(",") + ")" : parts[0];
+    if (rec.strand === "-") ej = "complement(" + ej + ")";
+    lines.push("     misc_feature    " + ej);
+    lines.push("                     /note=\"" + el.kind + " " + el.id + " (protein " + el.prot_start + "-" + el.prot_end + ")\"");
+    lines.push("                     /label=\"" + rec.transcript_id + ":" + el.id + "\"");
+    lines.push("                     /color=\"" + el.color + "\"");
+  });
+  lines.push("ORIGIN");
+  lines.push("//");
+  lines.push("");
+  lines.push("; Viewed region " + rec.scaffold + ":" + vs + "-" + ve + " (" + L + " bp), " + nEl + " structural feature(s).");
+  lines.push("; Genomic sequence omitted to keep the viewer lightweight. For a complete");
+  lines.push("; GenBank record WITH sequence, use genostruct_export.py export_region().");
+  return lines.join("\n");
 }
 function buildGenBank(rec) {
   var exons = rec.exons.slice().sort(function (a, b) { return a[0] - b[0]; });

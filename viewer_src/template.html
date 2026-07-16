@@ -14,7 +14,8 @@
          autocomplete="off" spellcheck="false" title="Type part of a transcript ID (e.g. 113516) and pick from the list"/>
   <datalist id="transcriptOptions"></datalist>
   <select id="transcriptSelect" title="Choose a transcript (numerically ordered)"></select>
-  <button id="exportBtn" title="Download a GenBank feature table for this transcript's region">Export GenBank</button>
+  <button id="exportBtn" title="Download a GenBank feature table for this transcript's whole region">Export GenBank (transcript)</button>
+  <button id="exportViewBtn" title="Download a GenBank feature table for the currently-viewed genome window">Export GenBank (viewed region)</button>
   <span class="spacer"></span>
   <span id="dsLabel"></span>
 </div>
@@ -45,7 +46,9 @@
     <div id="genomeTrack"></div>
   </div>
   <div id="legendPanel" class="panel">
-    <div class="panel-title">Structural elements (click to focus in 3D; hover to link across panels)</div>
+    <div class="panel-title">Structural elements (click to focus in 3D &amp; zoom genome; hover to link across panels)
+      <span id="focusInfo" class="hint" style="color:var(--accent)"></span>
+    </div>
     <div id="legend"></div>
   </div>
 </div>
