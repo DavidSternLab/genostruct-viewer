@@ -65,3 +65,23 @@ button#exportBtn:hover{filter:brightness(1.08)}
 #tooltip{position:absolute;z-index:9999;display:none;background:#04121f;color:#e6edf3;
   border:1px solid var(--accent);border-radius:6px;padding:6px 9px;font-size:12px;
   font-family:ui-monospace,monospace;pointer-events:none;max-width:420px;box-shadow:0 4px 18px rgba(0,0,0,.5)}
+
+/* export download notice + copy/save modal */
+.gb-notice{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:10000;
+  background:#04121f;color:#e6edf3;border:1px solid var(--accent);border-radius:8px;
+  padding:8px 12px;font-size:13px;box-shadow:0 6px 24px rgba(0,0,0,.6);display:flex;align-items:center;gap:8px}
+.gb-notice-link{background:var(--accent);color:#02121f;border:none;border-radius:5px;
+  padding:3px 9px;cursor:pointer;font-weight:600}
+.gb-notice-x{background:transparent;color:#9fb3c8;border:none;cursor:pointer;font-size:16px;line-height:1}
+.gb-modal-overlay{position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,.55);
+  display:flex;align-items:center;justify-content:center}
+.gb-modal{background:#0a1826;color:#e6edf3;border:1px solid var(--accent);border-radius:10px;
+  width:min(760px,92vw);max-height:86vh;display:flex;flex-direction:column;padding:14px;
+  box-shadow:0 10px 40px rgba(0,0,0,.7)}
+.gb-modal-head{font-size:14px;margin-bottom:8px}
+.gb-modal-btns{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.gb-modal-btns button,.gb-modal-link{background:var(--accent);color:#02121f;border:none;
+  border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:600;font-size:13px;text-decoration:none;display:inline-block}
+.gb-modal-text{flex:1;min-height:300px;width:100%;background:#02121f;color:#c7d5e6;
+  border:1px solid #21323f;border-radius:6px;font-family:ui-monospace,monospace;font-size:12px;
+  padding:8px;white-space:pre;overflow:auto;resize:vertical}

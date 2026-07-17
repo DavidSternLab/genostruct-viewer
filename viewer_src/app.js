@@ -770,6 +770,16 @@ async function init() {
     layoutIsExpanded: false, layoutShowControls: false, layoutShowSequence: false,
     layoutShowLog: false, layoutShowLeftPanel: false,
     viewportShowExpand: true, viewportShowSelectionMode: false, viewportShowAnimation: false,
+    // Disable extensions that fetch remote data on init. This viewer is fully
+    // offline (embedded in a sandboxed iframe with a restrictive CSP), so those
+    // fetches throw "Refused to connect ... Content Security Policy" and can
+    // abort plugin initialization mid-stream. volseg is the one that surfaced;
+    // the rest also make network calls and are unused here.
+    disabledExtensions: [
+      "volseg", "assembly-symmetry", "rcsb-validation-report",
+      "pdbe-structure-quality-report", "zenodo-import", "dnatco-ntcs",
+      "sb-ncbr-partial-charges", "wwpdb-chemical-component-dictionary",
+    ],
   });
   STATE.plugin = viewer.plugin ? viewer.plugin : viewer;
   document.getElementById("exportBtn").addEventListener("click", exportGenBankUI);
@@ -838,14 +848,65 @@ async function init() {
 /* =====================================================================
    GENBANK EXPORT (client-side feature table for the current transcript)
    ===================================================================== */
+// Robust text "download". A programmatic a[download] click is blocked in a
+// sandboxed about:srcdoc iframe (no allow-downloads), so we try several routes
+// and, if none navigates, fall back to a modal the user can copy or save from.
+function downloadText(filename, text) {
+  var blob = new Blob([text], { type: "chemical/x-genbank;charset=utf-8" });
+  var url = URL.createObjectURL(blob);
+  // Attempt a real file download (works when the host iframe allows downloads).
+  try {
+    var a = document.createElement("a");
+    a.href = url; a.download = filename; a.style.display = "none";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  } catch (e) { /* fall through to the notice */ }
+  // We cannot detect whether the download was blocked by the iframe sandbox, so
+  // show a small, auto-dismissing notice with a copy/open fallback rather than a
+  // full modal — non-intrusive when the download worked, a rescue when it didn't.
+  showDownloadNotice(filename, text, url);
+  setTimeout(function () { try { URL.revokeObjectURL(url); } catch (e3) {} }, 120000);
+}
+function showDownloadNotice(filename, text, url) {
+  var old = document.getElementById("gbNotice"); if (old) old.remove();
+  var n = document.createElement("div"); n.id = "gbNotice"; n.className = "gb-notice";
+  n.innerHTML = "Exported <b>" + filename + "</b>. Didn't download? ";
+  var a = document.createElement("button"); a.className = "gb-notice-link"; a.textContent = "Copy / open";
+  var x = document.createElement("button"); x.className = "gb-notice-x"; x.textContent = "\u00d7";
+  a.addEventListener("click", function () { showTextModal(filename, text, url); });
+  x.addEventListener("click", function () { n.remove(); });
+  n.appendChild(a); n.appendChild(x);
+  document.body.appendChild(n);
+  setTimeout(function () { if (n.parentNode) n.remove(); }, 12000);
+}
+function showTextModal(filename, text, url) {
+  var old = document.getElementById("gbModal"); if (old) old.remove();
+  var ov = document.createElement("div"); ov.id = "gbModal"; ov.className = "gb-modal-overlay";
+  var box = document.createElement("div"); box.className = "gb-modal";
+  var h = document.createElement("div"); h.className = "gb-modal-head";
+  h.innerHTML = "<b>" + filename + "</b> \u2014 GenBank feature table";
+  var btns = document.createElement("div"); btns.className = "gb-modal-btns";
+  var copy = document.createElement("button"); copy.textContent = "Copy to clipboard";
+  var save = document.createElement("a"); save.textContent = "Open in new tab"; save.href = url; save.target = "_blank"; save.className = "gb-modal-link";
+  var close = document.createElement("button"); close.textContent = "Close";
+  btns.appendChild(copy); btns.appendChild(save); btns.appendChild(close);
+  var ta = document.createElement("textarea"); ta.className = "gb-modal-text"; ta.value = text; ta.readOnly = true;
+  copy.addEventListener("click", function () {
+    ta.select();
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
+      else document.execCommand("copy");
+      copy.textContent = "Copied \u2713";
+    } catch (e) { copy.textContent = "Press \u2318/Ctrl+C"; }
+  });
+  close.addEventListener("click", function () { ov.remove(); });
+  ov.addEventListener("click", function (ev) { if (ev.target === ov) ov.remove(); });
+  box.appendChild(h); box.appendChild(btns); box.appendChild(ta);
+  ov.appendChild(box); document.body.appendChild(ov);
+  ta.focus(); ta.select();
+}
 function exportGenBankUI() {
   var rec = STATE.rec; if (!rec) return;
-  var gb = buildGenBank(rec);
-  var blob = new Blob([gb], { type: "text/plain" });
-  var a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = rec.transcript_id.replace(/[^A-Za-z0-9._-]/g, "_") + ".gb";
-  a.click();
+  downloadText(rec.transcript_id.replace(/[^A-Za-z0-9._-]/g, "_") + ".gb", buildGenBank(rec));
 }
 // Export the CURRENTLY-VIEWED genomic window as a GenBank feature table:
 // includes only exon/CDS/element segments that overlap the visible view range.
@@ -854,12 +915,7 @@ function exportViewedRegionUI() {
   var ext = genomeExtent();
   var view = STATE.gview || { start: ext[0], end: ext[1] };
   var vs = Math.round(Math.max(ext[0], view.start)), ve = Math.round(Math.min(ext[1], view.end));
-  var gb = buildGenBankRegion(rec, vs, ve);
-  var blob = new Blob([gb], { type: "text/plain" });
-  var a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = rec.scaffold + "_" + vs + "-" + ve + ".gb";
-  a.click();
+  downloadText(rec.scaffold + "_" + vs + "-" + ve + ".gb", buildGenBankRegion(rec, vs, ve));
 }
 function overlaps(a, b, s, e) { return a <= e && b >= s; }
 function clipParts(ranges, s, e, origin) {
