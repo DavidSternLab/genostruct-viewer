@@ -55,6 +55,18 @@ hovering or clicking an element in any panel highlights it everywhere.
 
 ---
 
+## Demo
+
+A short screen recording of the viewer in use — selecting a transcript, focusing
+structural elements in 3D, and the linked highlighting across the structure,
+sequence, and genome panels:
+
+https://github.com/DavidSternLab/genostruct-viewer/raw/main/docs/Use_genostruct.mp4
+
+*(If the inline player does not appear, [download the video](docs/Use_genostruct.mp4) or view it on the [repository page](https://github.com/DavidSternLab/genostruct-viewer/blob/main/docs/Use_genostruct.mp4).)*
+
+---
+
 ## Running the pipeline on your own data
 
 The pipeline is generic — nothing about the organism, file names, or gene IDs is
