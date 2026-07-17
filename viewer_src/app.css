@@ -39,6 +39,8 @@ button#exportBtn:hover{filter:brightness(1.08)}
 .aa.in-elem{cursor:pointer}
 .aa.hl{outline:2px solid #fff;outline-offset:-1px}
 .aa.sel{outline:2px solid var(--accent);outline-offset:-1px}
+.aa.rangesel{box-shadow:inset 0 -3px 0 var(--accent);background-clip:padding-box}
+#seqTrack .seqwrap{user-select:none;-webkit-user-select:none}
 /* genome */
 #genomePanel{flex:0 0 auto;background:var(--panel)}
 #genomeTrack{width:100%;height:150px}

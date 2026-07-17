@@ -15,9 +15,13 @@ var STATE = {
   index: null, rec: null, plugin: null,
   structureRef: null,
   colorThemeName: "genostruct-elements",
+  plddtThemeName: "genostruct-plddt",
   selected: null,
   dimElem: null,     // element to focus in 3D (rest dimmed)
   hoverElem: null,   // element hovered (brief 3D emphasis)
+  focusRange: null,  // {start,end} 1-based protein residue drag-selection
+  plddtMode: false,  // false = element colors, true = AF2 pLDDT confidence
+  flipGenome: true,  // true = show genome in protein N->C orientation (default)
 };
 
 /* ---- embedded-asset decoding (gzip + base64, inflated with pako) ------- */
@@ -83,6 +87,14 @@ function registerElementTheme(plugin) {
         // focus/dim: when an element is focused, keep its residues vivid and
         // fade everything else toward light grey. A hovered element (no focus)
         // gets a lighter emphasis without dimming the rest.
+        // (a) residue-range focus (drag-select on sequence): 1-based inclusive
+        var fr = STATE.focusRange;
+        if (fr) {
+          var res1 = protRes + 1;
+          if (res1 >= fr.start && res1 <= fr.end) return base;
+          return dimInt(base, base === DEFAULT ? 0.55 : 0.82);
+        }
+        // (b) element focus (click)
         var focus = STATE.dimElem;
         if (focus) {
           var reElem = rec.residue_element;
@@ -104,8 +116,36 @@ function registerElementTheme(plugin) {
     defaultValues: {},
     isApplicable: function () { return true; },
   };
+  // Second theme: AF2 pLDDT confidence, colored from the per-residue B-factors we
+  // stored in the pipeline (model.plddt). Self-contained so it works on plain PDB
+  // input, where Mol*'s built-in plddt-confidence theme is not applicable.
+  var plddtProvider = {
+    name: STATE.plddtThemeName,
+    label: "pLDDT confidence",
+    category: "Custom",
+    factory: function (ctx, props) {
+      function colorFor(location) {
+        var rec = STATE.rec;
+        var plddt = rec && rec.model ? rec.model.plddt : null;
+        if (!plddt) return DEFAULT;
+        var unit = location.unit, el = location.element;
+        if (!unit || el == null) return DEFAULT;
+        var ri;
+        try { ri = unit.model.atomicHierarchy.residueAtomSegments.index[el]; }
+        catch (e) { ri = undefined; }
+        if (ri == null || ri < 0 || ri >= plddt.length) return DEFAULT;
+        return plddtColor(plddt[ri]);
+      }
+      return { factory: plddtProvider.factory, granularity: "group", color: colorFor,
+               props: props || {}, description: "AF2 pLDDT confidence" };
+    },
+    getParams: function () { return {}; },
+    defaultValues: {},
+    isApplicable: function () { return true; },
+  };
   try {
     reg.add(provider);
+    reg.add(plddtProvider);
     STATE._themeRegistered = true;
   } catch (e) {
     // Already registered from a prior call (e.g. hot reload) — treat as success
@@ -113,14 +153,27 @@ function registerElementTheme(plugin) {
     STATE._themeRegistered = true;
   }
 }
+// AlphaFold pLDDT color ramp -> branded int
+function plddtColor(v) {
+  if (v == null) return 0xBFBFBF;
+  if (v >= 90) return 0x0053D6;   // very high (dark blue)
+  if (v >= 70) return 0x65CBF3;   // confident (cyan)
+  if (v >= 50) return 0xFFDB13;   // low (yellow)
+  return 0xFF7D45;                // very low (orange)
+}
 
+function activeThemeName() { return STATE.plddtMode ? STATE.plddtThemeName : STATE.colorThemeName; }
 async function loadStructure(tid) {
   var plugin = STATE.plugin;
   var status = document.getElementById("structStatus");
+  // token guards against a stale async load (rapid transcript switching): if a
+  // newer load started, this one stops touching the UI. This also prevents the
+  // spurious "Could not find node" error that fired from a late op on a cleared
+  // node even though the current structure rendered fine.
+  var myToken = (STATE._loadToken = (STATE._loadToken || 0) + 1);
+  var rendered = false;
+  if (status) status.textContent = "";
   try {
-    if (status) status.textContent = "";
-    // register the theme BEFORE clearing so a theme error can't strand us with
-    // an empty viewport; registration is idempotent (guarded).
     registerElementTheme(plugin);
     await plugin.clear();
     var pdbText = loadPDB(tid);
@@ -129,25 +182,28 @@ async function loadStructure(tid) {
     var traj = await plugin.builders.structure.parseTrajectory(data, "pdb");
     var model = await plugin.builders.structure.createModel(traj);
     var structure = await plugin.builders.structure.createStructure(model);
-    // Try our custom element coloring; if the theme ever fails, fall back to a
-    // built-in theme so the structure is ALWAYS visible.
     try {
       await plugin.builders.structure.representation.addRepresentation(structure, {
-        type: "cartoon", color: STATE.colorThemeName,
+        type: "cartoon", color: activeThemeName(),
       });
+      rendered = true;
     } catch (themeErr) {
       await plugin.builders.structure.representation.addRepresentation(structure, {
         type: "cartoon", color: "chain-id",
       });
-      if (status) status.textContent = "(structure shown with default coloring — custom theme unavailable)";
+      rendered = true;
+      if (myToken === STATE._loadToken && status) status.textContent = "(default coloring — custom theme unavailable)";
     }
     STATE.structureRef = structure;
-    plugin.managers.camera.reset();
+    try { plugin.managers.camera.reset(); } catch (camErr) { /* late/stale camera op — harmless */ }
   } catch (err) {
-    if (status) status.textContent = "Could not display structure for " + tid + ": " + (err && err.message ? err.message : err);
-    STATE.structureRef = null;
-    // rethrow-free: keep the app responsive so other panels/transcripts work
-    if (window.console) console.error("loadStructure failed", err);
+    // Only surface an error if the structure did NOT render AND this is still the
+    // current load. Stale-node errors from a superseded load are ignored.
+    if (!rendered && myToken === STATE._loadToken) {
+      if (status) status.textContent = "Could not display structure for " + tid + ": " + (err && err.message ? err.message : err);
+      STATE.structureRef = null;
+    }
+    if (window.console) console.warn("loadStructure note", err && err.message);
   }
 }
 
@@ -176,20 +232,92 @@ function renderSequence() {
     }
     (function (span) {
       span.addEventListener("mouseenter", function () {
+        if (STATE._seqDrag && STATE._seqDrag.on) { extendSeqDrag(+span.dataset.res); return; }
         if (span.dataset.elem) highlightElement(span.dataset.elem, true);
         showResidueTip(span);
       });
       span.addEventListener("mouseleave", function () {
+        if (STATE._seqDrag && STATE._seqDrag.on) return;
         if (span.dataset.elem) highlightElement(span.dataset.elem, false);
         hideTip();
       });
-      span.addEventListener("click", function () {
-        if (span.dataset.elem) selectElement(span.dataset.elem);
+      span.addEventListener("mousedown", function (ev) {
+        ev.preventDefault();
+        STATE._seqDrag = { on: true, anchor: +span.dataset.res, moved: false };
       });
     })(span);
     wrap.appendChild(span);
   }
   host.appendChild(wrap);
+  // apply any existing drag-selection highlight
+  paintSeqSelection();
+}
+// --- protein sequence drag-select: highlights a residue range, zooms the genome
+//     to the encoding bases, and focuses/dims the 3D structure to that range ---
+function extendSeqDrag(res) {
+  var d = STATE._seqDrag; if (!d || !d.on) return;
+  d.moved = true; d.cur = res;
+  paintSeqSelection();
+}
+function paintSeqSelection() {
+  var d = STATE._seqDrag, fr = STATE.focusRange;
+  var lo, hi;
+  if (d && d.on && d.cur != null) { lo = Math.min(d.anchor, d.cur); hi = Math.max(d.anchor, d.cur); }
+  else if (fr) { lo = fr.start; hi = fr.end; }
+  document.querySelectorAll('#seqTrack .aa').forEach(function (s) {
+    var r = +s.dataset.res;
+    s.classList.toggle("rangesel", lo != null && r >= lo && r <= hi);
+  });
+}
+function finishSeqDrag() {
+  var d = STATE._seqDrag; if (!d || !d.on) return;
+  d.on = false;
+  if (!d.moved || d.cur == null) {
+    // treat as a click: select the element under the residue, if any
+    var rec = STATE.rec, idx = d.anchor - 1;
+    var el = rec.residue_element && rec.residue_element[idx];
+    STATE._seqDrag = null;
+    if (el) selectElement(el);
+    return;
+  }
+  var lo = Math.min(d.anchor, d.cur), hi = Math.max(d.anchor, d.cur);
+  STATE._seqDrag = null;
+  applyResidueRangeFocus(lo, hi);
+}
+// Focus a protein residue range [lo,hi] (1-based): dim 3D outside it, zoom the
+// genome to the genomic bases encoding those residues, and mark the sequence.
+function applyResidueRangeFocus(lo, hi) {
+  STATE.selected = null; STATE.dimElem = null;      // range focus supersedes element focus
+  STATE.focusRange = { start: lo, end: hi };
+  paintSeqSelection();
+  recolor3D();
+  zoomGenomeToResidues(lo, hi);
+  var el = document.getElementById("focusInfo");
+  if (el) el.textContent = "Focused protein residues " + lo + "\u2013" + hi + " (click empty area or Reset to clear)";
+}
+function clearRangeFocus() {
+  STATE.focusRange = null;
+  paintSeqSelection();
+  recolor3D();
+  resetGenomeView();
+  var el = document.getElementById("focusInfo"); if (el) el.textContent = "";
+}
+// map a protein residue range to genomic coordinates via residue_genome, then
+// zoom the genome track to the enclosing window (handles minus strand + splits).
+function zoomGenomeToResidues(lo, hi) {
+  var rec = STATE.rec, rg = rec.residue_genome;
+  if (!rg) return;
+  var mn = Infinity, mx = -Infinity;
+  for (var r = lo; r <= hi; r++) {
+    var codon = rg[r - 1];
+    if (!codon) continue;
+    codon.forEach(function (p) { if (p < mn) mn = p; if (p > mx) mx = p; });
+  }
+  if (mn === Infinity) return;
+  var ext = genomeExtent();
+  var span = mx - mn, pad = Math.max(30, span * 0.4);
+  STATE.gview = { start: Math.max(ext[0], mn - pad), end: Math.min(ext[1], mx + pad) };
+  renderGenome();
 }
 
 /* =====================================================================
@@ -234,7 +362,15 @@ function renderGenome() {
   STATE.gview = { start: vs, end: ve };
   var W = host.clientWidth || 1000, PAD = 50, H = 150;
   var innerW = W - 2 * PAD, vspan = (ve - vs) || 1;
-  function X(g) { return PAD + (g - vs) / vspan * innerW; }
+  // orientation: when flipGenome is on and the gene is on the minus strand, draw
+  // the axis high->low so the genome reads in the same N->C direction as the
+  // protein. `flip` also drives the interaction handlers via STATE.gGeom.
+  var flip = !!(STATE.flipGenome && rec.strand === "-");
+  function X(g) {
+    var f = (g - vs) / vspan;
+    if (flip) f = 1 - f;
+    return PAD + f * innerW;
+  }
   function clampX(x) { return Math.max(PAD, Math.min(W - PAD, x)); }
   var NS = "http://www.w3.org/2000/svg";
   var svg = document.createElementNS(NS, "svg");
@@ -258,7 +394,11 @@ function renderGenome() {
   line.setAttribute("class", "intron-line");
   plot.appendChild(line);
 
-  var step = innerW / 30, dir = rec.strand === "+" ? 1 : -1;
+  // strand arrows point in the direction of transcription AS DRAWN. With flip on,
+  // a minus-strand gene reads left->right (N->C), so arrows point right (+1).
+  var txnDir = rec.strand === "+" ? 1 : -1;
+  var dir = flip ? -txnDir : txnDir;
+  var step = innerW / 30;
   for (var xa = PAD + 6; xa < W - PAD - 6; xa += step) {
     var ar = document.createElementNS(NS, "path");
     ar.setAttribute("d", "M" + xa + "," + (yLine - 4) + " L" + (xa + dir * 6) + "," + yLine + " L" + xa + "," + (yLine + 4));
@@ -267,7 +407,7 @@ function renderGenome() {
   }
   function drawBox(a, b, y, h, cls, fill, elId) {
     if (b < vs || a > ve) return null;          // fully outside view
-    var x0 = X(a), x1 = X(b);
+    var xa2 = X(a), xb2 = X(b), x0 = Math.min(xa2, xb2), x1 = Math.max(xa2, xb2);
     var r = document.createElementNS(NS, "rect");
     r.setAttribute("x", x0); r.setAttribute("y", y);
     r.setAttribute("width", Math.max(cls === "sse-genome" ? 1.5 : 1, x1 - x0));
@@ -288,8 +428,10 @@ function renderGenome() {
       r.addEventListener("click", function () { selectElement(el.id); });
     });
   });
-  // coordinate labels reflect the CURRENT view window
-  [[vs, "start"], [ve, "end"]].forEach(function (t) {
+  // coordinate labels reflect the CURRENT view window. With flip on, the LEFT
+  // edge of the drawing is the higher coordinate (ve) and the right edge is vs.
+  var leftCoord = flip ? ve : vs, rightCoord = flip ? vs : ve;
+  [[leftCoord, "start"], [rightCoord, "end"]].forEach(function (t) {
     var tx = document.createElementNS(NS, "text");
     tx.setAttribute("x", t[1] === "start" ? PAD : W - PAD); tx.setAttribute("y", yExon - 10);
     tx.setAttribute("class", "coord-label");
@@ -297,6 +439,14 @@ function renderGenome() {
     tx.textContent = rec.scaffold + ":" + Math.round(t[0]).toLocaleString();
     svg.appendChild(tx);
   });
+  // orientation caption (left -> right reading direction)
+  var ori = document.createElementNS(NS, "text");
+  ori.setAttribute("x", W / 2); ori.setAttribute("y", yExon - 10);
+  ori.setAttribute("text-anchor", "middle"); ori.setAttribute("class", "row-label");
+  ori.textContent = flip
+    ? "5'\u21923' protein N\u2192C  (minus-strand gene shown flipped)"
+    : (rec.strand === "-" ? "genome 5'\u21923' (minus-strand: protein reads right\u2192left)" : "5'\u21923' protein N\u2192C");
+  svg.appendChild(ori);
   [["exon", yExon + exonH / 2 + 4], ["CDS", yCDS + cdsH / 2 + 4]].forEach(function (l) {
     var tx = document.createElementNS(NS, "text");
     tx.setAttribute("x", 6); tx.setAttribute("y", l[1]);
@@ -313,7 +463,7 @@ function renderGenome() {
   svg.appendChild(zt);
 
   // per-render geometry the (once-installed) interaction handlers read
-  STATE.gGeom = { svg: svg, X: X, vs: vs, ve: ve, innerW: innerW, PAD: PAD, W: W };
+  STATE.gGeom = { svg: svg, X: X, vs: vs, ve: ve, innerW: innerW, PAD: PAD, W: W, flip: flip };
   // wheel + dblclick live on the freshly-created svg (replaced each render)
   svg.addEventListener("wheel", onGenomeWheel, { passive: false });
   svg.addEventListener("mousedown", onGenomeMouseDown);
@@ -325,6 +475,7 @@ function gAtClientX(clientX) {
   var g = STATE.gGeom;
   var rect = g.svg.getBoundingClientRect();
   var frac = (clientX - rect.left - g.PAD) / g.innerW;
+  if (g.flip) frac = 1 - frac;   // inverse of the flipped X() mapping
   return g.vs + frac * (g.ve - g.vs);
 }
 function onGenomeWheel(ev) {
@@ -349,6 +500,7 @@ function onWindowMouseMove(ev) {
   var g = STATE.gGeom, vspan = g.ve - g.vs, ext = genomeExtent();
   var dpx = ev.clientX - STATE._drag.lastX; STATE._drag.lastX = ev.clientX;
   var dg = -(dpx / g.innerW) * vspan;
+  if (g.flip) dg = -dg;   // flipped axis: dragging right moves toward lower coords
   var ns = g.vs + dg, ne = g.ve + dg;
   if (ns < ext[0]) { ne += (ext[0] - ns); ns = ext[0]; }
   if (ne > ext[1]) { ns -= (ne - ext[1]); ne = ext[1]; }
@@ -423,16 +575,21 @@ function updateFocusBanner() {
 // theme (the loci/selection APIs are not exported by the Viewer UMD; recoloring
 // via the registered theme is the reliable path and also drives the dim effect).
 function recolor3D() {
+  // focus/dim only makes sense in element-color mode; leave pLDDT view untouched
+  if (STATE.plddtMode) return;
+  applyTheme(STATE.colorThemeName);
+}
+// Switch the structure between element colors and the built-in pLDDT theme.
+function setStructureColorMode() { applyTheme(activeThemeName()); }
+function applyTheme(themeName) {
   var plugin = STATE.plugin;
   if (!plugin) return;
   try {
     var comps = plugin.managers.structure.hierarchy.current.structures[0];
     comps = comps ? comps.components : null;
     if (!comps || !comps.length) return;
-    plugin.managers.structure.component.updateRepresentationsTheme(comps, {
-      color: STATE.colorThemeName,
-    });
-  } catch (e) { if (window.console) console.warn("recolor3D failed", e); }
+    plugin.managers.structure.component.updateRepresentationsTheme(comps, { color: themeName });
+  } catch (e) { if (window.console) console.warn("applyTheme failed", e); }
 }
 
 /* =====================================================================
@@ -468,6 +625,7 @@ async function selectTranscript(tid) {
   STATE.rec = loadRecord(tid);
   STATE.gview = null;              // reset zoom/pan for new locus
   STATE.selected = null; STATE.dimElem = null; STATE.hoverElem = null;  // clear focus
+  STATE.focusRange = null; STATE._seqDrag = null;
   updateFocusBanner();
   var selEl = document.getElementById("transcriptSelect");
   if (selEl && selEl.value !== tid) selEl.value = tid;
@@ -552,6 +710,12 @@ function populateSelector() {
   search.addEventListener("keydown", function (ev) {
     if (ev.key === "Enter") { ev.preventDefault(); tryGo(search.value); }
   });
+  // On focus, select all text and expose the FULL list so the user can browse
+  // every protein without first deleting the current name.
+  search.addEventListener("focus", function () {
+    rebuildDatalist("");       // full list available immediately
+    search.select();           // typing replaces the current name
+  });
 }
 async function init() {
   STATE.index = JSON.parse(decodeAsset("index-json"));
@@ -565,10 +729,33 @@ async function init() {
   document.getElementById("exportBtn").addEventListener("click", exportGenBankUI);
   var evb = document.getElementById("exportViewBtn");
   if (evb) evb.addEventListener("click", exportViewedRegionUI);
+  // color-mode toggle: element colors <-> AF2 pLDDT confidence
+  var ctog = document.getElementById("colorModeBtn");
+  if (ctog) ctog.addEventListener("click", function () {
+    STATE.plddtMode = !STATE.plddtMode;
+    ctog.textContent = STATE.plddtMode ? "Color: pLDDT" : "Color: elements";
+    ctog.title = STATE.plddtMode
+      ? "Structure colored by AF2 pLDDT confidence — click for element colors"
+      : "Structure colored by structural element — click for AF2 pLDDT confidence";
+    setStructureColorMode();
+  });
+  // genome orientation toggle
+  var otog = document.getElementById("orientBtn");
+  if (otog) otog.addEventListener("click", function () {
+    STATE.flipGenome = !STATE.flipGenome;
+    otog.textContent = STATE.flipGenome ? "Orient: protein N\u2192C" : "Orient: genome 5'\u21923'";
+    renderGenome();
+  });
   window.addEventListener("resize", function () { if (STATE.rec) renderGenome(); });
   // once-installed genome pan handlers
   window.addEventListener("mousemove", onWindowMouseMove);
   window.addEventListener("mouseup", onWindowMouseUp);
+  // once-installed sequence drag-select finish
+  window.addEventListener("mouseup", finishSeqDrag);
+  // double-click the sequence clears a range focus
+  document.getElementById("seqTrack").addEventListener("dblclick", function () {
+    if (STATE.focusRange) clearRangeFocus();
+  });
   // sequence zoom controls
   var sz = document.getElementById("seqZoomIn"), so = document.getElementById("seqZoomOut"), sr = document.getElementById("seqZoomReset");
   if (sz) sz.addEventListener("click", function () { STATE.seqZoom = Math.min(4, (STATE.seqZoom || 1) * 1.25); renderSequence(); });
