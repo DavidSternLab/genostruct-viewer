@@ -474,6 +474,11 @@ def build_transcript_record(tid, t, pdb_path, full_prot, genome, copy_pdb_to=Non
         "scaffold": t.scaffold,
         "strand": t.strand,
         "span": list(t.span) if t.span else None,
+        # forward-strand genomic sequence over the locus span (1-based inclusive).
+        # Lets the viewer emit GenBank with the actual sequence for any sub-window
+        # without shipping the whole genome. Loci are small (~kb), gzips well.
+        "locus_sequence": (str(genome[t.scaffold][t.span[0]-1:t.span[1]]).upper()
+                            if t.span and t.scaffold in genome else None),
         "protein_length": prot_len,
         "protein_sequence": full_prot.rstrip('*'),
         "model": {

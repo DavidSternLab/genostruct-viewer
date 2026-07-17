@@ -970,13 +970,43 @@ function buildGenBankRegion(rec, vs, ve) {
     lines.push("                     /label=\"" + rec.transcript_id + ":" + el.id + "\"");
     lines.push("                     /color=\"" + el.color + "\"");
   });
+  // ORIGIN — full forward-strand genomic sequence of the viewed window, sliced
+  // from the embedded per-locus sequence.
+  var seq = locusWindowSeq(rec, vs, ve);
   lines.push("ORIGIN");
+  if (seq) lines.push.apply(lines, gbOriginLines(seq));
   lines.push("//");
   lines.push("");
   lines.push("; Viewed region " + rec.scaffold + ":" + vs + "-" + ve + " (" + L + " bp), " + nEl + " structural feature(s).");
-  lines.push("; Genomic sequence omitted to keep the viewer lightweight. For a complete");
-  lines.push("; GenBank record WITH sequence, use genostruct_export.py export_region().");
+  if (!seq) {
+    lines.push("; Genomic sequence unavailable for this transcript (no embedded locus sequence).");
+    lines.push("; For a complete GenBank record, use genostruct_export.py export_region().");
+  }
   return lines.join("\n");
+}
+// Slice the embedded per-locus forward-strand sequence to a genomic window.
+// rec.locus_sequence covers [span[0]..span[1]] inclusive (1-based).
+function locusWindowSeq(rec, gStart, gEnd) {
+  if (!rec.locus_sequence || !rec.span) return null;
+  var s0 = rec.span[0];
+  var a = Math.max(0, gStart - s0), b = Math.min(rec.locus_sequence.length, gEnd - s0 + 1);
+  if (b <= a) return null;
+  return rec.locus_sequence.slice(a, b);
+}
+// Format a nucleotide sequence as GenBank ORIGIN lines: 60 bases/line in blocks
+// of 10, with a right-justified coordinate in column 1.
+function gbOriginLines(seq) {
+  var out = [];
+  seq = seq.toLowerCase();
+  for (var i = 0; i < seq.length; i += 60) {
+    var chunk = seq.substr(i, 60);
+    var blocks = [];
+    for (var j = 0; j < chunk.length; j += 10) blocks.push(chunk.substr(j, 10));
+    var num = String(i + 1);
+    while (num.length < 9) num = " " + num;
+    out.push(num + " " + blocks.join(" "));
+  }
+  return out;
 }
 function buildGenBank(rec) {
   var exons = rec.exons.slice().sort(function (a, b) { return a[0] - b[0]; });
@@ -1007,12 +1037,17 @@ function buildGenBank(rec) {
     lines.push("                     /label=\"" + el.id + "\"");
     lines.push("                     /color=\"" + el.color + "\"");
   });
+  // ORIGIN — forward-strand genomic sequence spanning the gene (gmin..gmax).
+  var seq = locusWindowSeq(rec, gmin, gmax);
   lines.push("ORIGIN");
+  if (seq) lines.push.apply(lines, gbOriginLines(seq));
   lines.push("//");
   lines.push("");
-  lines.push("; NOTE: genomic sequence omitted from the in-browser export to keep");
-  lines.push("; the viewer lightweight. For a complete GenBank record WITH sequence,");
-  lines.push("; use genostruct_export.py (see README).");
+  if (!seq) {
+    lines.push("; NOTE: genomic sequence unavailable (no embedded locus sequence for");
+    lines.push("; this transcript). For a complete GenBank record WITH sequence,");
+    lines.push("; use genostruct_export.py (see README).");
+  }
   return lines.join("\n");
 }
 
