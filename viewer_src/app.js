@@ -579,17 +579,34 @@ function recolor3D() {
   if (STATE.plddtMode) return;
   applyTheme(STATE.colorThemeName);
 }
-// Switch the structure between element colors and the built-in pLDDT theme.
-function setStructureColorMode() { applyTheme(activeThemeName()); }
+// Switch the structure between element colors and the custom pLDDT theme. The
+// theme change reliably re-invokes the factory; if the in-place update path ever
+// fails we rebuild the representation (the known-good initial-render path).
+function setStructureColorMode() {
+  if (!applyTheme(activeThemeName()) && STATE.rec) {
+    loadStructure(STATE.rec.transcript_id);
+  }
+}
 function applyTheme(themeName) {
   var plugin = STATE.plugin;
-  if (!plugin) return;
+  if (!plugin) return false;
   try {
     var comps = plugin.managers.structure.hierarchy.current.structures[0];
     comps = comps ? comps.components : null;
-    if (!comps || !comps.length) return;
-    plugin.managers.structure.component.updateRepresentationsTheme(comps, { color: themeName });
-  } catch (e) { if (window.console) console.warn("applyTheme failed", e); }
+    if (!comps || !comps.length) return false;
+    // A changing colorParams (nonce) is REQUIRED: Mol*'s SW() builds the theme
+    // descriptor as {name, params}, and the state reconciler skips the update
+    // when {name, params} is unchanged — so recoloring with the same theme name
+    // and empty params is a no-op and the factory never re-reads STATE (focus/
+    // dim/range). Bumping a nonce makes params differ each call, forcing the
+    // recompute. (Our theme getParams() ignores unknown keys, so nonce is inert
+    // aside from busting the equality check.)
+    STATE._recolorNonce = (STATE._recolorNonce || 0) + 1;
+    plugin.managers.structure.component.updateRepresentationsTheme(comps, {
+      color: themeName, colorParams: { nonce: STATE._recolorNonce },
+    });
+    return true;
+  } catch (e) { if (window.console) console.warn("applyTheme failed", e); return false; }
 }
 
 /* =====================================================================
@@ -731,21 +748,35 @@ async function init() {
   if (evb) evb.addEventListener("click", exportViewedRegionUI);
   // color-mode toggle: element colors <-> AF2 pLDDT confidence
   var ctog = document.getElementById("colorModeBtn");
+  function labelColorBtn() {
+    // buttons label the ACTION (what a press does), not the current state
+    if (!ctog) return;
+    ctog.textContent = STATE.plddtMode ? "Show element colors" : "Show pLDDT";
+    ctog.title = STATE.plddtMode
+      ? "Currently AF2 pLDDT confidence \u2014 switch to structural-element colors"
+      : "Currently structural-element colors \u2014 switch to AF2 pLDDT confidence";
+  }
   if (ctog) ctog.addEventListener("click", function () {
     STATE.plddtMode = !STATE.plddtMode;
-    ctog.textContent = STATE.plddtMode ? "Color: pLDDT" : "Color: elements";
-    ctog.title = STATE.plddtMode
-      ? "Structure colored by AF2 pLDDT confidence — click for element colors"
-      : "Structure colored by structural element — click for AF2 pLDDT confidence";
+    labelColorBtn();
     setStructureColorMode();
   });
+  labelColorBtn();
   // genome orientation toggle
   var otog = document.getElementById("orientBtn");
+  function labelOrientBtn() {
+    if (!otog) return;
+    otog.textContent = STATE.flipGenome ? "Show genome 5'\u21923'" : "Show protein N\u2192C";
+    otog.title = STATE.flipGenome
+      ? "Currently protein N\u2192C orientation \u2014 switch to native genome 5'\u21923'"
+      : "Currently native genome 5'\u21923' \u2014 switch to protein N\u2192C orientation";
+  }
   if (otog) otog.addEventListener("click", function () {
     STATE.flipGenome = !STATE.flipGenome;
-    otog.textContent = STATE.flipGenome ? "Orient: protein N\u2192C" : "Orient: genome 5'\u21923'";
+    labelOrientBtn();
     renderGenome();
   });
+  labelOrientBtn();
   window.addEventListener("resize", function () { if (STATE.rec) renderGenome(); });
   // once-installed genome pan handlers
   window.addEventListener("mousemove", onWindowMouseMove);
