@@ -61,9 +61,9 @@ A short screen recording of the viewer in use — selecting a transcript, focusi
 structural elements in 3D, and the linked highlighting across the structure,
 sequence, and genome panels:
 
-https://github.com/DavidSternLab/genostruct-viewer/raw/main/docs/Use_genostruct.mp4
+https://github.com/user-attachments/assets/af3bcaa9-fe6a-483a-8d37-d4690365c8cb
 
-*(If the inline player does not appear, [download the video](docs/Use_genostruct.mp4) or view it on the [repository page](https://github.com/DavidSternLab/genostruct-viewer/blob/main/docs/Use_genostruct.mp4).)*
+*(The video plays inline on GitHub. A copy is also committed at [`docs/Use_genostruct.mp4`](docs/Use_genostruct.mp4) for offline/download use.)*
 
 ---
 
