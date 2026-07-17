@@ -44,10 +44,14 @@ hovering or clicking an element in any panel highlights it everywhere.
 ### Viewer controls
 
 - **3D structure (Mol\*)** — rotate (drag), zoom (scroll), pan (right-drag). Native Mol* interaction.
+  - **Show pLDDT / Show element colors** — toggle the cartoon between the per-element color scheme (matched to the sequence and genome tracks) and the AF2 pLDDT confidence ramp (from the model B-factors).
 - **Protein sequence** — zoomable: use the **− / reset / +** buttons, or **Ctrl/⌘ + scroll** over the sequence.
+  - **Drag-select a residue range** — dims the rest of the structure, recenters the 3D camera on the selection, and zooms the genome track to the encoding bases. Double-click the sequence to clear.
 - **Genome track** — **scroll to zoom** (centered on the cursor), **drag to pan**, **double-click to reset** to the full locus. A readout shows current zoom factor and window size in bp.
-- **Legend / elements** — click a chip to focus that element in 3D; hover to highlight across panels.
-- **Export GenBank** — downloads a feature table for the current transcript (see note below).
+  - **Show genome 5'→3' / Show protein N→C** — toggle the genome-track orientation. By default the track is drawn in the protein's N→C direction (reversed for minus-strand genes); the toggle switches to native 5'→3'.
+- **Structural elements (legend or sequence)** — click an element (a legend chip, a colored sequence block, or a genome feature) to **focus it in 3D** (that element stays vivid, the rest dims), **recenter the camera** on it, and **zoom the genome track** to its bases. Click again or click empty space to clear. Hovering an element highlights it across all three panels.
+- **Search box** — type a gene number to filter the transcript list; the full numerically-ordered dropdown stays available.
+- **Export GenBank (transcript / viewed region)** — downloads an annotated GenBank record; the viewed-region export includes the full sequence of the current genome window (see note below).
 
 ---
 
@@ -166,16 +170,14 @@ complete record with sequence, use `genostruct_export.py`.
 
 ### Known limitations
 
-- **Browser rendering was not runtime-tested in this build environment** (headless
-  browser automation is unavailable in the sandbox). The viewer was written against
-  Mol*'s documented public API and the exact color-theme provider contract verified
-  in the bundled Mol* 4.9.0; every API path used was confirmed present. If anything
-  needs adjustment it will be in the Mol* 3D coloring/selection glue, not in the
-  data (which is validated above) or the sequence/genome panels (plain DOM/SVG).
 - **3 PDB models** in the source set correspond to stale isoform IDs absent from the
   protein FASTA and are excluded (documented in the pipeline output warnings).
 - **10 models** differ from their deposited protein by internal indels and are placed
   by local alignment (identity ≥ 0.6); their per-residue mapping is still validated
   correct by the CDS/element round-trip above.
-- The in-browser GenBank export omits sequence by design; use the Python exporter
-  for complete records.
+- The viewer runs entirely offline in a single self-contained HTML file. If it is
+  opened inside a **sandboxed iframe with a restrictive Content-Security-Policy**
+  (some hosted environments do this), the file-download of a GenBank export may be
+  blocked by the sandbox; a copy-to-clipboard / open-in-new-tab fallback is provided
+  for that case. Opened directly in a browser (double-clicking the file, or served
+  from a normal web server), downloads work normally.

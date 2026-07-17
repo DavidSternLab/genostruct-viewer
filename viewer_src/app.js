@@ -15,7 +15,11 @@ var STATE = {
   index: null, rec: null, plugin: null,
   structureRef: null,
   colorThemeName: "genostruct-elements",
+  colorThemeNameB: "genostruct-elements-b",  // alternate name; see registerElementTheme
   plddtThemeName: "genostruct-plddt",
+  plddtThemeNameB: "genostruct-plddt-b",
+  _elemToggle: false,   // flips each recolor to alternate theme names
+  _plddtToggle: false,
   selected: null,
   dimElem: null,     // element to focus in 3D (rest dimmed)
   hoverElem: null,   // element hovered (brief 3D emphasis)
@@ -68,95 +72,94 @@ function registerElementTheme(plugin) {
   if (STATE._themeRegistered) return;
   var reg = plugin.representation.structure.themes.colorThemeRegistry;
   var DEFAULT = 0xBFBFBF; // coil grey
-  var provider = {
-    name: STATE.colorThemeName,
-    label: "Structural elements",
-    category: "Custom",
-    factory: function (ctx, props) {
-      function colorFor(location) {
-        var rec = STATE.rec;
-        var recColors = rec ? rec.residue_color : null;
-        if (!recColors) return DEFAULT;
-        var off = (rec.model && rec.model.offset) || 0;
-        var unit = location.unit, el = location.element;
-        if (!unit || el === undefined || el === null) return DEFAULT;
-        var residueIndex;
-        try { residueIndex = unit.model.atomicHierarchy.residueAtomSegments.index[el]; }
-        catch (e) { residueIndex = undefined; }
-        if (residueIndex === undefined || residueIndex === null) return DEFAULT;
-        // residueIndex is 0-based within model; map to full protein residue.
-        var protRes = off + residueIndex;
-        var base = DEFAULT;
-        if (protRes >= 0 && protRes < recColors.length) {
-          var c = recColors[protRes];
-          if (c) base = hexToInt(c);
-        }
-        // focus/dim: when an element is focused, keep its residues vivid and
-        // fade everything else toward light grey. A hovered element (no focus)
-        // gets a lighter emphasis without dimming the rest.
-        // (a) residue-range focus (drag-select on sequence): 1-based inclusive
-        var fr = STATE.focusRange;
-        if (fr) {
-          var res1 = protRes + 1;
-          if (res1 >= fr.start && res1 <= fr.end) return base;
-          return dimInt(base, base === DEFAULT ? 0.55 : 0.82);
-        }
-        // (b) element focus (click)
-        var focus = STATE.dimElem;
-        if (focus) {
-          var reElem = rec.residue_element;
-          var thisElem = (reElem && protRes >= 0 && protRes < reElem.length) ? reElem[protRes] : null;
-          if (thisElem === focus) return base;              // focused element: full color
-          return dimInt(base, base === DEFAULT ? 0.55 : 0.82); // everything else: dimmed
-        }
-        return base;
-      }
-      return {
-        factory: provider.factory,
-        granularity: "group",
-        color: colorFor,
-        props: props || {},
-        description: "Genostruct structural elements",
-      };
-    },
-    getParams: function () { return {}; },
-    defaultValues: {},
-    isApplicable: function () { return true; },
-  };
-  // Second theme: AF2 pLDDT confidence, colored from the per-residue B-factors we
-  // stored in the pipeline (model.plddt). Self-contained so it works on plain PDB
-  // input, where Mol*'s built-in plddt-confidence theme is not applicable.
-  var plddtProvider = {
-    name: STATE.plddtThemeName,
-    label: "pLDDT confidence",
-    category: "Custom",
-    factory: function (ctx, props) {
-      function colorFor(location) {
-        var rec = STATE.rec;
-        var plddt = rec && rec.model ? rec.model.plddt : null;
-        if (!plddt) return DEFAULT;
-        var unit = location.unit, el = location.element;
-        if (!unit || el == null) return DEFAULT;
-        var ri;
-        try { ri = unit.model.atomicHierarchy.residueAtomSegments.index[el]; }
-        catch (e) { ri = undefined; }
-        if (ri == null || ri < 0 || ri >= plddt.length) return DEFAULT;
-        return plddtColor(plddt[ri]);
-      }
-      return { factory: plddtProvider.factory, granularity: "group", color: colorFor,
-               props: props || {}, description: "AF2 pLDDT confidence" };
-    },
-    getParams: function () { return {}; },
-    defaultValues: {},
-    isApplicable: function () { return true; },
-  };
+
+  // residueIndex (0-based within model) from a Mol* location — the exact helper
+  // Mol*'s own themes use.
+  function residueIndexOf(location) {
+    var unit = location.unit, el = location.element;
+    if (!unit || el === undefined || el === null) return undefined;
+    try { return unit.model.atomicHierarchy.residueAtomSegments.index[el]; }
+    catch (e) { return undefined; }
+  }
+
+  // Element-color theme: per-residue color from the record, with focus/dim
+  // applied by reading STATE live (so re-running the factory re-reads focus).
+  function elementColorFor(location) {
+    var rec = STATE.rec;
+    var recColors = rec ? rec.residue_color : null;
+    if (!recColors) return DEFAULT;
+    var off = (rec.model && rec.model.offset) || 0;
+    var residueIndex = residueIndexOf(location);
+    if (residueIndex === undefined || residueIndex === null) return DEFAULT;
+    var protRes = off + residueIndex; // 0-based full-protein residue
+    var base = DEFAULT;
+    if (protRes >= 0 && protRes < recColors.length) {
+      var c = recColors[protRes];
+      if (c) base = hexToInt(c);
+    }
+    // (a) residue-range focus (drag-select on sequence): 1-based inclusive
+    var fr = STATE.focusRange;
+    if (fr) {
+      var res1 = protRes + 1;
+      if (res1 >= fr.start && res1 <= fr.end) return base;
+      return dimInt(base, base === DEFAULT ? 0.55 : 0.82);
+    }
+    // (b) element focus (click): focused element vivid, everything else dimmed
+    var focus = STATE.dimElem;
+    if (focus) {
+      var reElem = rec.residue_element;
+      var thisElem = (reElem && protRes >= 0 && protRes < reElem.length) ? reElem[protRes] : null;
+      if (thisElem === focus) return base;
+      return dimInt(base, base === DEFAULT ? 0.55 : 0.82);
+    }
+    return base;
+  }
+
+  // pLDDT confidence theme: per-residue from the model.plddt B-factors.
+  function plddtColorFor(location) {
+    var rec = STATE.rec;
+    var plddt = rec && rec.model ? rec.model.plddt : null;
+    if (!plddt) return DEFAULT;
+    var ri = residueIndexOf(location);
+    if (ri == null || ri < 0 || ri >= plddt.length) return DEFAULT;
+    return plddtColor(plddt[ri]);
+  }
+
+  // Build a provider for a given name + color function. The factory reads STATE
+  // live, so ONE provider serves every transcript and every focus/dim state.
+  function makeProvider(name, label, desc, colorFn) {
+    var prov = {
+      name: name, label: label, category: "Custom",
+      factory: function (ctx, props) {
+        return { factory: prov.factory, granularity: "group", color: colorFn,
+                 props: props || {}, description: desc };
+      },
+      getParams: function () { return {}; },
+      defaultValues: {},
+      isApplicable: function () { return true; },
+    };
+    return prov;
+  }
+
+  // Mol*'s representation diff is schema-aware: an extra colorParams key (our old
+  // "nonce") is dropped because getParams() declares no params, so recoloring
+  // with the SAME theme name produced identical {name, params:{}} and the state
+  // reconciler skipped the update — the factory never re-ran (verified via
+  // instrumentation: colorFor calls = 0 on every recolor). A theme-NAME change is
+  // always a real change, so we register TWO names per theme and alternate them
+  // on each recolor; the factory is then guaranteed to re-run and re-read STATE.
+  var names = [
+    [STATE.colorThemeName,  "Structural elements",   "Genostruct structural elements", elementColorFor],
+    [STATE.colorThemeNameB, "Structural elements 2", "Genostruct structural elements", elementColorFor],
+    [STATE.plddtThemeName,  "pLDDT confidence",      "AF2 pLDDT confidence",           plddtColorFor],
+    [STATE.plddtThemeNameB, "pLDDT confidence 2",    "AF2 pLDDT confidence",           plddtColorFor],
+  ];
   try {
-    reg.add(provider);
-    reg.add(plddtProvider);
+    names.forEach(function (n) { reg.add(makeProvider(n[0], n[1], n[2], n[3])); });
     STATE._themeRegistered = true;
   } catch (e) {
-    // Already registered from a prior call (e.g. hot reload) — treat as success
-    // so we never retry and never let the throw propagate into loadStructure.
+    // Already registered (e.g. hot reload) — treat as success so we never retry
+    // and never let the throw propagate into loadStructure.
     STATE._themeRegistered = true;
   }
 }
@@ -169,7 +172,18 @@ function plddtColor(v) {
   return 0xFF7D45;                // very low (orange)
 }
 
-function activeThemeName() { return STATE.plddtMode ? STATE.plddtThemeName : STATE.colorThemeName; }
+// Current theme name for the active mode, honoring the alternation toggle so the
+// initial render and subsequent recolors stay on the same registered provider.
+function activeThemeName() {
+  if (STATE.plddtMode) return STATE._plddtToggle ? STATE.plddtThemeNameB : STATE.plddtThemeName;
+  return STATE._elemToggle ? STATE.colorThemeNameB : STATE.colorThemeName;
+}
+// Next theme name for the active mode: flip the toggle so the NAME actually
+// changes, guaranteeing Mol* re-runs the color factory (see registerElementTheme).
+function nextThemeName() {
+  if (STATE.plddtMode) { STATE._plddtToggle = !STATE._plddtToggle; return STATE._plddtToggle ? STATE.plddtThemeNameB : STATE.plddtThemeName; }
+  STATE._elemToggle = !STATE._elemToggle; return STATE._elemToggle ? STATE.colorThemeNameB : STATE.colorThemeName;
+}
 async function loadStructure(tid) {
   var plugin = STATE.plugin;
   var status = document.getElementById("structStatus");
@@ -313,6 +327,9 @@ function applyResidueRangeFocus(lo, hi) {
   paintSeqSelection();
   recolor3D();
   zoomGenomeToResidues(lo, hi);
+  // recenter the 3D camera on the selected residue range (model residues)
+  var off = (STATE.rec.model && STATE.rec.model.offset) || 0;
+  focusCameraOnModelResidues(lo - 1 - off, hi - 1 - off);
   var el = document.getElementById("focusInfo");
   if (el) el.textContent = "Focused protein residues " + lo + "\u2013" + hi + " (click empty area or Reset to clear)";
 }
@@ -321,6 +338,7 @@ function clearRangeFocus() {
   paintSeqSelection();
   recolor3D();
   resetGenomeView();
+  resetCamera();
   var el = document.getElementById("focusInfo"); if (el) el.textContent = "";
 }
 // map a protein residue range to genomic coordinates via residue_genome, then
@@ -339,6 +357,51 @@ function zoomGenomeToResidues(lo, hi) {
   var span = mx - mn, pad = Math.max(30, span * 0.4);
   STATE.gview = { start: Math.max(ext[0], mn - pad), end: Math.min(ext[1], mx + pad) };
   renderGenome();
+}
+
+// Recenter/zoom the 3D camera on a set of MODEL residues (0-based indices,
+// inclusive). Mol*'s loci-construction APIs (Script/StructureElement) are not
+// exported by the Viewer UMD, but managers.camera.focusSphere({center,radius})
+// takes a plain point+radius. We compute the centroid and bounding radius of the
+// residues' atoms directly from the model conformation (x/y/z arrays, with
+// residueAtomSegments.offsets giving each residue's atom span).
+function focusCameraOnModelResidues(loIdx, hiIdx) {
+  var plugin = STATE.plugin;
+  try {
+    var st = plugin.managers.structure.hierarchy.current.structures[0];
+    var struct = st && st.cell && st.cell.obj ? st.cell.obj.data : null;
+    if (!struct || !struct.models || !struct.models.length) return;
+    var model = struct.models[0];
+    var conf = model.atomicConformation;
+    var seg = model.atomicHierarchy.residueAtomSegments;
+    if (!conf || !seg || !seg.offsets) return;
+    var nRes = seg.offsets.length - 1;
+    var lo = Math.max(0, loIdx), hi = Math.min(nRes - 1, hiIdx);
+    if (hi < lo) return;
+    var a0 = seg.offsets[lo], a1 = seg.offsets[hi + 1]; // atom span [a0, a1)
+    if (a1 <= a0) return;
+    var cx = 0, cy = 0, cz = 0, n = a1 - a0;
+    for (var i = a0; i < a1; i++) { cx += conf.x[i]; cy += conf.y[i]; cz += conf.z[i]; }
+    cx /= n; cy /= n; cz /= n;
+    var rad = 0;
+    for (var j = a0; j < a1; j++) {
+      var dx = conf.x[j] - cx, dy = conf.y[j] - cy, dz = conf.z[j] - cz;
+      var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (d > rad) rad = d;
+    }
+    rad = Math.max(rad, 5); // floor so a single residue still frames sensibly
+    // Guard: a non-finite centroid or radius would poison the camera target and
+    // freeze the trackball. Skip the focus rather than corrupt the camera.
+    if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(rad)) return;
+    // center MUST be a Vec3 (numeric [x,y,z] array): Mol*'s camera.getFocus reads
+    // it via Vec3.sub/Vec3.clone (indexed access). Passing a {x,y,z} object yields
+    // NaN in the camera target and FREEZES the trackball controls.
+    plugin.managers.camera.focusSphere({ center: [cx, cy, cz], radius: rad }, { durationMs: 350 });
+  } catch (e) { /* camera focus is best-effort; never break selection on failure */ }
+}
+// Reset the camera to frame the whole structure.
+function resetCamera() {
+  try { STATE.plugin.managers.camera.reset(); } catch (e) { /* harmless */ }
 }
 
 /* =====================================================================
@@ -570,6 +633,13 @@ function highlightElement(elemId, on) {
   }
 }
 function selectElement(elemId) {
+  // Element focus and residue-range focus are mutually exclusive. colorFor checks
+  // focusRange BEFORE dimElem, so a lingering range from a prior drag-select would
+  // swallow every element click. Clear it here (and its sequence highlight).
+  if (STATE.focusRange) {
+    STATE.focusRange = null;
+    document.querySelectorAll("#seqTrack .rangesel").forEach(function (n) { n.classList.remove("rangesel"); });
+  }
   STATE.selected = (STATE.selected === elemId) ? null : elemId;
   document.querySelectorAll(".sel").forEach(function (n) { n.classList.remove("sel"); });
   if (STATE.selected) {
@@ -577,10 +647,17 @@ function selectElement(elemId) {
     STATE.dimElem = elemId;      // focus in 3D: this element vivid, rest dimmed
     recolor3D();
     zoomGenomeToElement(elemId); // auto-zoom the genome track around this element
+    // recenter the 3D camera on this element (model residues = prot - 1 - offset)
+    var e = STATE.rec.elements.filter(function (x) { return x.id === elemId; })[0];
+    if (e) {
+      var off = (STATE.rec.model && STATE.rec.model.offset) || 0;
+      focusCameraOnModelResidues(e.prot_start - 1 - off, e.prot_end - 1 - off);
+    }
   } else {
     STATE.dimElem = null;
     recolor3D();
     resetGenomeView();
+    resetCamera();
   }
   updateFocusBanner();
 }
@@ -598,50 +675,45 @@ function updateFocusBanner() {
 function recolor3D() {
   // focus/dim only makes sense in element-color mode; leave pLDDT view untouched
   if (STATE.plddtMode) return;
-  applyTheme(STATE.colorThemeName);
+  applyTheme();
 }
 // Switch the structure between element colors and the custom pLDDT theme. The
 // theme change reliably re-invokes the factory; if the in-place update path ever
 // fails we rebuild the representation (the known-good initial-render path).
 function setStructureColorMode() {
-  if (!applyTheme(activeThemeName()) && STATE.rec) {
+  if (!applyTheme() && STATE.rec) {
     loadStructure(STATE.rec.transcript_id);
   }
 }
-function applyTheme(themeName) {
+// Recolor the structure. Uses nextThemeName() which FLIPS to the alternate
+// registered provider name for the active mode, so the transform's {name} truly
+// changes and Mol* re-runs the color factory (a same-name update is dropped by
+// the schema-aware diff — verified: colorFor ran 0 times). Both A/B providers
+// read STATE live, so focus/dim/range and pLDDT-vs-element are always current.
+function applyTheme() {
   var plugin = STATE.plugin;
   if (!plugin) return false;
-  // A changing colorParams (nonce) is REQUIRED regardless of path: Mol*'s state
-  // reconciler skips an update whose {name, params} is unchanged, so recoloring
-  // with the same theme name would be a no-op and the factory never re-reads
-  // STATE (focus/dim/range). Our theme getParams() returns {}, so the nonce is
-  // inert to the color output — it only busts the equality check.
-  STATE._recolorNonce = (STATE._recolorNonce || 0) + 1;
-  // Primary path: the component manager helper. Now that the cartoon is attached
-  // to a polymer COMPONENT (see loadStructure), it appears in
-  // structures[0].components[].representations, so this documented API reaches it.
+  var themeName = nextThemeName();
   try {
     var s0 = plugin.managers.structure.hierarchy.current.structures[0];
     var comps = s0 ? s0.components : null;
     if (comps && comps.length) {
-      plugin.managers.structure.component.updateRepresentationsTheme(comps, {
-        color: themeName, colorParams: { nonce: STATE._recolorNonce },
-      });
+      plugin.managers.structure.component.updateRepresentationsTheme(comps, { color: themeName });
       return true;
     }
-  } catch (e) { if (window.console) console.warn("applyTheme manager path failed", e && e.message); }
+  } catch (e) { /* fall through to the state-builder path below */ }
   // Fallback: update the specific representation node's colorTheme via the state
   // builder (reaches the rep even if it isn't under a component).
   try {
     var ref = STATE.reprRef;
     if (ref) {
-      var params = { name: themeName, params: { nonce: STATE._recolorNonce } };
+      var params = { name: themeName, params: {} };
       var b = plugin.build();
       b.to(ref).update(function (old) { if (old) old.colorTheme = params; });
       b.commit();
       return true;
     }
-  } catch (e2) { if (window.console) console.warn("applyTheme builder path failed", e2 && e2.message); }
+  } catch (e2) { /* recolor is best-effort */ }
   return false;
 }
 
