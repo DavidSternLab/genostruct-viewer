@@ -782,10 +782,19 @@ async function init() {
     // fetches throw "Refused to connect ... Content Security Policy" and can
     // abort plugin initialization mid-stream. volseg is the one that surfaced;
     // the rest also make network calls and are unused here.
+    // Disable every non-essential extension. Two classes are fatal in this
+    // offline, CSP-restricted iframe: (a) extensions that fetch remote data on
+    // init (volseg, validation reports, zenodo), and (b) extensions that bundle
+    // an emscripten WASM module loaded from a data: URL the CSP blocks —
+    // mp4-export (H.264 encoder), geo-export, model-export. The viewer only needs
+    // cartoon rendering + custom color themes, so none of these are used.
     disabledExtensions: [
       "volseg", "assembly-symmetry", "rcsb-validation-report",
       "pdbe-structure-quality-report", "zenodo-import", "dnatco-ntcs",
       "sb-ncbr-partial-charges", "wwpdb-chemical-component-dictionary",
+      "mp4-export", "geo-export", "model-export", "g3d",
+      "anvil-membrane-orientation", "backgrounds", "mvs", "tunnels",
+      "ma-quality-assessment",
     ],
   });
   STATE.plugin = viewer.plugin ? viewer.plugin : viewer;

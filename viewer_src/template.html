@@ -57,6 +57,41 @@
 
 <div id="tooltip"></div>
 
+<!-- data: URL fetch shim (must load before Mol*). Some Mol* subsystems load an
+     emscripten WASM module via fetch() of a data:application/octet-stream URL.
+     This viewer runs in a sandboxed iframe whose CSP connect-src forbids data:,
+     so that fetch is blocked and aborts init. Serving data: URLs locally (decode
+     in-page, no network) satisfies the module loader without any connection, so
+     CSP never applies. Passes every other URL straight through. -->
+<script>
+(function () {
+  if (typeof window.fetch !== "function") return;
+  var orig = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    var url = (typeof input === "string") ? input : (input && input.url);
+    if (url && url.slice(0, 5) === "data:") {
+      try {
+        var comma = url.indexOf(",");
+        var meta = url.slice(5, comma);
+        var body = url.slice(comma + 1);
+        var ctype = meta.replace(/;base64/i, "") || "application/octet-stream";
+        var bytes;
+        if (/;base64/i.test(meta)) {
+          var bin = atob(body);
+          bytes = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        } else {
+          bytes = new TextEncoder().encode(decodeURIComponent(body));
+        }
+        return Promise.resolve(new Response(bytes, {
+          status: 200, headers: { "Content-Type": ctype },
+        }));
+      } catch (e) { return Promise.reject(e); }
+    }
+    return orig(input, init);
+  };
+})();
+</script>
 <!-- embedded data (gzip + base64) -->
 <script id="index-json" type="application/octet-stream">__INDEX_B64__</script>
 <script>/*__PAKO_JS__*/</script>
