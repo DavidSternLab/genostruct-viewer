@@ -11,106 +11,116 @@ Usage:
         --template viewer_src/template.html --app-js viewer_src/app.js \
         --app-css viewer_src/app.css --html viewer/genostruct_viewer.html
 """
-import os, glob, json, gzip, base64, argparse
+import os, glob, json, gzip, base64, argparse, io
 
 def gz_b64(text: str) -> str:
     if isinstance(text, str): text = text.encode("utf-8")
     return base64.b64encode(gzip.compress(text, 9)).decode("ascii")
 
-# Standard 3-letter residue names for HELIX/SHEET records (fallback ALA).
-_AA3 = {"A":"ALA","R":"ARG","N":"ASN","D":"ASP","C":"CYS","Q":"GLN","E":"GLU",
-        "G":"GLY","H":"HIS","I":"ILE","L":"LEU","K":"LYS","M":"MET","F":"PHE",
-        "P":"PRO","S":"SER","T":"THR","W":"TRP","Y":"TYR","V":"VAL"}
+# --- PDB -> mmCIF with model secondary structure -------------------------------
+# Mol*'s "auto" secondary-structure only reads model SS from the mmCIF
+# categories struct_conf (helices) / struct_sheet_range (strands); for a PDB it
+# runs DSSP, whose WASM is fetched from a data: URL that the viewer's iframe CSP
+# blocks. So we convert each AF2 PDB to mmCIF and add struct_conf /
+# struct_sheet_range from the pipeline's own SSE elements. Then hasSecondaryStructure()
+# returns true and Mol* uses the model SS -- no DSSP, no blocked fetch.
+import numpy as _np
+import biotite.structure.io.pdb as _pdbio
+import biotite.structure.io.pdbx as _pdbx
 
-def _pdb_resnames(pdb_text):
-    """auth_seq_id -> 3-letter residue name, from CA ATOM records (chain-agnostic)."""
-    res, chain = {}, {}
-    for line in pdb_text.splitlines():
-        if line.startswith(("ATOM", "HETATM")) and line[12:16].strip() == "CA":
-            try:
-                n = int(line[22:26])
-            except ValueError:
-                continue
-            res.setdefault(n, line[17:20].strip() or "ALA")
-            chain.setdefault(n, (line[21:22].strip() or "A"))
-    return res, chain
+def _residue_meta(arr):
+    """auth res_id -> {comp, asym}; plus label_seq_id map (sequential per residue)."""
+    meta = {}
+    for i in range(arr.array_length()):
+        rid = int(arr.res_id[i])
+        if rid not in meta:
+            meta[rid] = {"comp": str(arr.res_name[i]), "asym": (str(arr.chain_id[i]) or "A")}
+    uniq = sorted(meta)
+    label = {rid: str(k + 1) for k, rid in enumerate(uniq)}
+    return meta, label
 
-def _helix_record(serial, hid, init_resn, init_chain, init_seq,
-                  end_resn, end_chain, end_seq, length):
-    """Build a spec-column PDB HELIX record (offsets verified against Mol*'s parser).
-    cols: serNum 7(3), helixID 11(3), initResName 15(3), initChain 19(1),
-          initSeq 21(4), endResName 27(3), endChain 31(1), endSeq 33(4),
-          helixClass 38(2), length 71(5)."""
-    s = list(" " * 80)
-    def put(text, start, width, right=False):
-        text = str(text)[:width]
-        text = text.rjust(width) if right else text.ljust(width)
-        s[start:start+width] = list(text)
-    put("HELIX", 0, 6)
-    put(serial, 7, 3, right=True)
-    put(hid, 11, 3, right=True)
-    put(init_resn, 15, 3); put(init_chain, 19, 1)
-    put(init_seq, 21, 4, right=True)
-    put(end_resn, 27, 3); put(end_chain, 31, 1)
-    put(end_seq, 33, 4, right=True)
-    put("1", 38, 2, right=True)          # helixClass 1 = right-handed alpha
-    put(length, 71, 5, right=True)
-    return "".join(s).rstrip()
-
-def _sheet_record(strand, sid, nstr, init_resn, init_chain, init_seq,
-                  end_resn, end_chain, end_seq):
-    """Build a spec-column PDB SHEET record (offsets verified against Mol*'s parser).
-    cols: strand 7(3), sheetID 11(3), numStrands 14(2), initResName 17(3),
-          initChain 21(1), initSeq 22(4), endResName 28(3), endChain 32(1),
-          endSeq 33(4), sense 38(2)."""
-    s = list(" " * 80)
-    def put(text, start, width, right=False):
-        text = str(text)[:width]
-        text = text.rjust(width) if right else text.ljust(width)
-        s[start:start+width] = list(text)
-    put("SHEET", 0, 6)
-    put(strand, 7, 3, right=True)
-    put(sid, 11, 3)
-    put(nstr, 14, 2, right=True)
-    put(init_resn, 17, 3); put(init_chain, 21, 1)
-    put(init_seq, 22, 4, right=True)
-    put(end_resn, 28, 3); put(end_chain, 32, 1)
-    put(end_seq, 33, 4, right=True)
-    put("0", 38, 2, right=True)          # sense 0 for the first strand of a sheet
-    return "".join(s).rstrip()
-
-def pdb_with_ss(pdb_text, rec):
-    """Prepend HELIX/SHEET records derived from the pipeline's SSE elements so
-    Mol*'s 'auto' secondary-structure reads them from the model instead of
-    running DSSP (whose WASM is fetched from a data: URL that the viewer's CSP
-    blocks). Element prot_start/prot_end are full-protein 1-based; model auth =
-    prot - offset (AF2 PDBs are numbered from 1)."""
+def _ss_spans(rec, meta):
+    """Return (helices, strands) as lists of (beg_auth, end_auth) snapped to
+    residue ids that actually exist in the model (AF2 models can have gaps)."""
     off = (rec.get("model") or {}).get("offset", 0) or 0
-    res, chain = _pdb_resnames(pdb_text)
-    if not res:
-        return pdb_text
-    lo_auth, hi_auth = min(res), max(res)
-    hlines, slines, hser, sser = [], [], 0, 0
+    if not meta:
+        return [], []
+    present = sorted(meta)
+    lo, hi = present[0], present[-1]
+    pset = set(present)
+
+    def snap_up(x):    # smallest present id >= x
+        while x <= hi and x not in pset:
+            x += 1
+        return x if x <= hi else None
+
+    def snap_down(x):  # largest present id <= x
+        while x >= lo and x not in pset:
+            x -= 1
+        return x if x >= lo else None
+
+    helices, strands = [], []
     for el in rec.get("elements", []):
         a = el["prot_start"] - off
         b = el["prot_end"] - off
         if b < a:
             continue
-        a = max(lo_auth, a); b = min(hi_auth, b)   # clamp into the model
-        if b < a:
+        a = snap_up(max(lo, a))
+        b = snap_down(min(hi, b))
+        if a is None or b is None or b < a:
             continue
-        init_resn = res.get(a, "ALA"); end_resn = res.get(b, "ALA")
-        init_chain = chain.get(a, "A"); end_chain = chain.get(b, "A")
-        if el["kind"] == "helix":
-            hser += 1
-            hlines.append(_helix_record(hser, hser, init_resn, init_chain, a,
-                                        end_resn, end_chain, b, b - a + 1))
-        else:
-            sser += 1
-            slines.append(_sheet_record(sser, "A", 1, init_resn, init_chain, a,
-                                        end_resn, end_chain, b))
-    header = "\n".join(hlines + slines)
-    return (header + "\n" + pdb_text) if header else pdb_text
+        (helices if el["kind"] == "helix" else strands).append((a, b))
+    return helices, strands
+
+def _add_ss_categories(block, rec, arr):
+    meta, label = _residue_meta(arr)
+    helices, strands = _ss_spans(rec, meta)
+    if helices:
+        cols = {k: [] for k in (
+            "conf_type_id", "id", "pdbx_PDB_helix_class",
+            "beg_label_comp_id", "beg_label_asym_id", "beg_label_seq_id",
+            "beg_auth_comp_id", "beg_auth_asym_id", "beg_auth_seq_id",
+            "end_label_comp_id", "end_label_asym_id", "end_label_seq_id",
+            "end_auth_comp_id", "end_auth_asym_id", "end_auth_seq_id",
+            "pdbx_PDB_helix_length")}
+        for k, (a, b) in enumerate(helices, 1):
+            cols["conf_type_id"].append("HELX_P"); cols["id"].append("HELX%d" % k); cols["pdbx_PDB_helix_class"].append("1")
+            cols["beg_label_comp_id"].append(meta[a]["comp"]); cols["beg_label_asym_id"].append(meta[a]["asym"]); cols["beg_label_seq_id"].append(label[a])
+            cols["beg_auth_comp_id"].append(meta[a]["comp"]); cols["beg_auth_asym_id"].append(meta[a]["asym"]); cols["beg_auth_seq_id"].append(str(a))
+            cols["end_label_comp_id"].append(meta[b]["comp"]); cols["end_label_asym_id"].append(meta[b]["asym"]); cols["end_label_seq_id"].append(label[b])
+            cols["end_auth_comp_id"].append(meta[b]["comp"]); cols["end_auth_asym_id"].append(meta[b]["asym"]); cols["end_auth_seq_id"].append(str(b))
+            cols["pdbx_PDB_helix_length"].append(str(b - a + 1))
+        cat = _pdbx.CIFCategory()
+        for k, v in cols.items():
+            cat[k] = _pdbx.CIFColumn(list(map(str, v)))
+        block["struct_conf"] = cat
+    if strands:
+        cols = {k: [] for k in (
+            "sheet_id", "id",
+            "beg_label_comp_id", "beg_label_asym_id", "beg_label_seq_id",
+            "beg_auth_comp_id", "beg_auth_asym_id", "beg_auth_seq_id",
+            "end_label_comp_id", "end_label_asym_id", "end_label_seq_id",
+            "end_auth_comp_id", "end_auth_asym_id", "end_auth_seq_id")}
+        for k, (a, b) in enumerate(strands, 1):
+            cols["sheet_id"].append("A"); cols["id"].append(str(k))
+            cols["beg_label_comp_id"].append(meta[a]["comp"]); cols["beg_label_asym_id"].append(meta[a]["asym"]); cols["beg_label_seq_id"].append(label[a])
+            cols["beg_auth_comp_id"].append(meta[a]["comp"]); cols["beg_auth_asym_id"].append(meta[a]["asym"]); cols["beg_auth_seq_id"].append(str(a))
+            cols["end_label_comp_id"].append(meta[b]["comp"]); cols["end_label_asym_id"].append(meta[b]["asym"]); cols["end_label_seq_id"].append(label[b])
+            cols["end_auth_comp_id"].append(meta[b]["comp"]); cols["end_auth_asym_id"].append(meta[b]["asym"]); cols["end_auth_seq_id"].append(str(b))
+        cat = _pdbx.CIFCategory()
+        for k, v in cols.items():
+            cat[k] = _pdbx.CIFColumn(list(map(str, v)))
+        block["struct_sheet_range"] = cat
+
+def pdb_to_cif_with_ss(pdb_path, rec, block_name):
+    """Convert an AF2 PDB to mmCIF text carrying model secondary structure."""
+    arr = _pdbio.PDBFile.read(pdb_path).get_structure(model=1, extra_fields=["b_factor"])
+    cif = _pdbx.CIFFile()
+    _pdbx.set_structure(cif, arr, data_block=block_name)   # writes B_iso_or_equiv (pLDDT)
+    _add_ss_categories(cif.block, rec, arr)
+    buf = io.StringIO()
+    cif.write(buf)
+    return buf.getvalue()
 
 def build_html(out_dir, molstar_js, molstar_css, pako_js,
                template, app_js, app_css, html_out, limit=None):
@@ -120,7 +130,7 @@ def build_html(out_dir, molstar_js, molstar_css, pako_js,
     txs = index["transcripts"]
     if limit: txs = txs[:limit]
 
-    embed = {"data": {}, "pdb": {}}
+    embed = {"data": {}, "cif": {}}
     for t in txs:
         tid = t["transcript_id"]
         rec_path = os.path.join(data_dir, t["file"])
@@ -136,13 +146,13 @@ def build_html(out_dir, molstar_js, molstar_css, pako_js,
             cands = [c for c in cands if safe in os.path.basename(c)]
             pdb_path = cands[0] if cands else None
         if pdb_path and os.path.exists(pdb_path):
-            pdb_text = open(pdb_path, "r").read()
-            # inject HELIX/SHEET so Mol* uses model SS (avoids the DSSP WASM fetch)
-            pdb_text = pdb_with_ss(pdb_text, rec)
-            embed["pdb"][tid] = gz_b64(pdb_text)
+            # convert to mmCIF WITH model secondary structure so Mol* never runs
+            # the CSP-blocked DSSP WASM (see pdb_to_cif_with_ss).
+            cif_text = pdb_to_cif_with_ss(pdb_path, rec, safe)
+            embed["cif"][tid] = gz_b64(cif_text)
 
     # trim index to the transcripts we actually embedded
-    index_slim = {"transcripts": [t for t in txs if t["transcript_id"] in embed["pdb"]],
+    index_slim = {"transcripts": [t for t in txs if t["transcript_id"] in embed["cif"]],
                   "warnings": index.get("warnings", [])[:50]}
 
     tmpl = open(template).read()

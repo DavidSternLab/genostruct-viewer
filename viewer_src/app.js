@@ -36,7 +36,14 @@ function decodeAsset(id) {
   return el ? inflateStr(el.textContent.trim()) : null;
 }
 function loadRecord(tid) { return JSON.parse(inflateStr(EMBED.data[tid])); }
-function loadPDB(tid) { return inflateStr(EMBED.pdb[tid]); }
+// Structures are embedded as mmCIF (with model secondary structure baked into
+// struct_conf/struct_sheet_range) so Mol* renders cartoons without running the
+// CSP-blocked DSSP WASM. EMBED.pdb is kept as a fallback for older builds.
+function loadStructureText(tid) {
+  if (EMBED.cif && EMBED.cif[tid]) return { text: inflateStr(EMBED.cif[tid]), fmt: "mmcif" };
+  if (EMBED.pdb && EMBED.pdb[tid]) return { text: inflateStr(EMBED.pdb[tid]), fmt: "pdb" };
+  return null;
+}
 
 /* ---- color helpers ---------------------------------------------------- */
 function hexToInt(hex) { return parseInt(hex.replace('#', ''), 16); }
@@ -176,10 +183,10 @@ async function loadStructure(tid) {
   try {
     registerElementTheme(plugin);
     await plugin.clear();
-    var pdbText = loadPDB(tid);
-    if (!pdbText) throw new Error("no embedded PDB for " + tid);
-    var data = await plugin.builders.data.rawData({ data: pdbText, label: tid });
-    var traj = await plugin.builders.structure.parseTrajectory(data, "pdb");
+    var st = loadStructureText(tid);
+    if (!st) throw new Error("no embedded structure for " + tid);
+    var data = await plugin.builders.data.rawData({ data: st.text, label: tid });
+    var traj = await plugin.builders.structure.parseTrajectory(data, st.fmt);
     var model = await plugin.builders.structure.createModel(traj);
     var structure = await plugin.builders.structure.createStructure(model);
     // Add a polymer COMPONENT and attach the cartoon to it. This is load-bearing:
