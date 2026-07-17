@@ -182,19 +182,33 @@ async function loadStructure(tid) {
     var traj = await plugin.builders.structure.parseTrajectory(data, "pdb");
     var model = await plugin.builders.structure.createModel(traj);
     var structure = await plugin.builders.structure.createStructure(model);
+    // Add a polymer COMPONENT and attach the cartoon to it. This is load-bearing:
+    // updateRepresentationsTheme iterates structures[0].components[].representations,
+    // so a representation added directly to the structure (not under a component)
+    // is invisible to the recolor path — which is why dim/pLDDT silently no-op'd.
+    var repr = null;
     try {
-      await plugin.builders.structure.representation.addRepresentation(structure, {
-        type: "cartoon", color: activeThemeName(),
-      });
+      var comp = await plugin.builders.structure.tryCreateComponentStatic(structure, "polymer");
+      if (comp) {
+        repr = await plugin.builders.structure.representation.addRepresentation(comp, {
+          type: "cartoon", color: activeThemeName(),
+        });
+      } else {
+        // no polymer component (e.g. all-hetero) — fall back to whole structure
+        repr = await plugin.builders.structure.representation.addRepresentation(structure, {
+          type: "cartoon", color: activeThemeName(),
+        });
+      }
       rendered = true;
     } catch (themeErr) {
-      await plugin.builders.structure.representation.addRepresentation(structure, {
+      repr = await plugin.builders.structure.representation.addRepresentation(structure, {
         type: "cartoon", color: "chain-id",
       });
       rendered = true;
       if (myToken === STATE._loadToken && status) status.textContent = "(default coloring — custom theme unavailable)";
     }
     STATE.structureRef = structure;
+    STATE.reprRef = repr && repr.ref ? repr.ref : repr;   // selector for direct recolor
     try { plugin.managers.camera.reset(); } catch (camErr) { /* late/stale camera op — harmless */ }
   } catch (err) {
     // Only surface an error if the structure did NOT render AND this is still the
@@ -590,23 +604,38 @@ function setStructureColorMode() {
 function applyTheme(themeName) {
   var plugin = STATE.plugin;
   if (!plugin) return false;
+  // A changing colorParams (nonce) is REQUIRED regardless of path: Mol*'s state
+  // reconciler skips an update whose {name, params} is unchanged, so recoloring
+  // with the same theme name would be a no-op and the factory never re-reads
+  // STATE (focus/dim/range). Our theme getParams() returns {}, so the nonce is
+  // inert to the color output — it only busts the equality check.
+  STATE._recolorNonce = (STATE._recolorNonce || 0) + 1;
+  // Primary path: the component manager helper. Now that the cartoon is attached
+  // to a polymer COMPONENT (see loadStructure), it appears in
+  // structures[0].components[].representations, so this documented API reaches it.
   try {
-    var comps = plugin.managers.structure.hierarchy.current.structures[0];
-    comps = comps ? comps.components : null;
-    if (!comps || !comps.length) return false;
-    // A changing colorParams (nonce) is REQUIRED: Mol*'s SW() builds the theme
-    // descriptor as {name, params}, and the state reconciler skips the update
-    // when {name, params} is unchanged — so recoloring with the same theme name
-    // and empty params is a no-op and the factory never re-reads STATE (focus/
-    // dim/range). Bumping a nonce makes params differ each call, forcing the
-    // recompute. (Our theme getParams() ignores unknown keys, so nonce is inert
-    // aside from busting the equality check.)
-    STATE._recolorNonce = (STATE._recolorNonce || 0) + 1;
-    plugin.managers.structure.component.updateRepresentationsTheme(comps, {
-      color: themeName, colorParams: { nonce: STATE._recolorNonce },
-    });
-    return true;
-  } catch (e) { if (window.console) console.warn("applyTheme failed", e); return false; }
+    var s0 = plugin.managers.structure.hierarchy.current.structures[0];
+    var comps = s0 ? s0.components : null;
+    if (comps && comps.length) {
+      plugin.managers.structure.component.updateRepresentationsTheme(comps, {
+        color: themeName, colorParams: { nonce: STATE._recolorNonce },
+      });
+      return true;
+    }
+  } catch (e) { if (window.console) console.warn("applyTheme manager path failed", e && e.message); }
+  // Fallback: update the specific representation node's colorTheme via the state
+  // builder (reaches the rep even if it isn't under a component).
+  try {
+    var ref = STATE.reprRef;
+    if (ref) {
+      var params = { name: themeName, params: { nonce: STATE._recolorNonce } };
+      var b = plugin.build();
+      b.to(ref).update(function (old) { if (old) old.colorTheme = params; });
+      b.commit();
+      return true;
+    }
+  } catch (e2) { if (window.console) console.warn("applyTheme builder path failed", e2 && e2.message); }
+  return false;
 }
 
 /* =====================================================================
