@@ -21,11 +21,32 @@ Outputs one compact JSON per transcript plus an index.json, suitable for the
 self-contained HTML viewer, and supports GenBank export of any genomic region.
 """
 from __future__ import annotations
-import os, re, glob, json, argparse
+import os, re, glob, json, argparse, shutil, subprocess, tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 
 import numpy as np
+
+# ----------------------------------------------------------------------------
+# Derive protein.fa from genome + GFF3 via gffread
+# ----------------------------------------------------------------------------
+def derive_pep_fasta(genome_fa: str, gff3: str, out_pep_fa: str, gffread_bin: str = "gffread") -> str:
+    """
+    Run gffread to translate CDS features (genome + GFF3) into a protein FASTA,
+    keyed by transcript ID, written to out_pep_fa. Requires gffread on PATH
+    (bioconda: `conda install -c bioconda gffread`).
+    """
+    if shutil.which(gffread_bin) is None:
+        raise RuntimeError(
+            f"'{gffread_bin}' not found on PATH. Install it (e.g. "
+            "`conda install -c bioconda gffread`) or pass an explicit peptide FASTA."
+        )
+    os.makedirs(os.path.dirname(os.path.abspath(out_pep_fa)) or ".", exist_ok=True)
+    cmd = [gffread_bin, gff3, "-g", genome_fa, "-y", out_pep_fa, "-S"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"gffread failed ({' '.join(cmd)}):\n{result.stderr}")
+    return out_pep_fa
 
 # ----------------------------------------------------------------------------
 # Genetic code (standard table 1)
@@ -505,23 +526,38 @@ def build_transcript_record(tid, t, pdb_path, full_prot, genome, copy_pdb_to=Non
 def _safe(s):
     return re.sub(r"[^A-Za-z0-9._-]", "_", s)
 
-def build(genome_fa, gff3, pep_fa, pdb_dir, out_dir,
-          id_regex=None, limit=None, verbose=True):
+def build(genome_fa, gff3, pdb_dir, out_dir, pep_fa=None,
+          id_regex=None, limit=None, verbose=True, gffread_bin="gffread"):
     """
     Run the full pipeline. Writes out_dir/data/<tid>.json and out_dir/data/index.json,
     and copies the matched PDBs into out_dir/structures/.
+
+    If `pep_fa` is omitted, the protein FASTA is derived automatically from
+    `genome_fa` + `gff3` via gffread (CDS translation, keyed by transcript ID).
+
     Returns the index dict.
     """
     os.makedirs(out_dir, exist_ok=True)
     data_dir = os.path.join(out_dir, "data"); os.makedirs(data_dir, exist_ok=True)
     struct_dir = os.path.join(out_dir, "structures")
 
-    if verbose: print("Loading genome ..."); 
+    if verbose: print("Loading genome ...");
     genome = load_fasta(genome_fa)
     if verbose: print(f"  {len(genome)} sequences")
-    if verbose: print("Loading peptides ...")
-    pep = load_fasta(pep_fa)
-    if verbose: print(f"  {len(pep)} proteins")
+
+    derived_pep_tmp = None
+    if pep_fa is None:
+        if verbose: print("No peptide FASTA given — deriving via gffread ...")
+        derived_pep_tmp = tempfile.NamedTemporaryFile(suffix=".pep.fa", delete=False).name
+        pep_fa = derive_pep_fasta(genome_fa, gff3, derived_pep_tmp, gffread_bin=gffread_bin)
+
+    try:
+        if verbose: print("Loading peptides ...")
+        pep = load_fasta(pep_fa)
+        if verbose: print(f"  {len(pep)} proteins")
+    finally:
+        if derived_pep_tmp and os.path.exists(derived_pep_tmp):
+            os.remove(derived_pep_tmp)
     if verbose: print("Parsing GFF3 ...")
     tx = parse_gff3(gff3)
     if verbose: print(f"  {len(tx)} transcripts")
@@ -571,15 +607,17 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Integrated genome/gene/protein/structure pipeline")
     ap.add_argument("--genome", required=True)
     ap.add_argument("--gff", required=True)
-    ap.add_argument("--pep", required=True)
+    ap.add_argument("--pep", default=None,
+                    help="protein FASTA; if omitted, derived from --genome + --gff via gffread")
     ap.add_argument("--pdb-dir", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--id-regex", default=None,
                     help="regex whose group(1) extracts the transcript id from a PDB filename stem")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--gffread-bin", default="gffread")
     args = ap.parse_args()
-    build(args.genome, args.gff, args.pep, args.pdb_dir, args.out,
-          id_regex=args.id_regex, limit=args.limit)
+    build(args.genome, args.gff, args.pdb_dir, args.out, pep_fa=args.pep,
+          id_regex=args.id_regex, limit=args.limit, gffread_bin=args.gffread_bin)
 
 
 

@@ -70,13 +70,19 @@ https://github.com/user-attachments/assets/af3bcaa9-fe6a-483a-8d37-d4690365c8cb
 ## Running the pipeline on your own data
 
 The pipeline is generic — nothing about the organism, file names, or gene IDs is
-hardcoded. It needs four inputs:
+hardcoded. It needs three inputs:
 
 - a **genome FASTA** (`*.fa`),
 - a **GFF3** annotation (genes / mRNA / exon / CDS with phase),
-- a **protein FASTA** (`pep.fa`),
 - a folder of **PDB** structure models (e.g. AlphaFold predictions), for any
   subset of the proteins.
+
+The **protein FASTA is derived automatically** from the genome + GFF3 via
+[`gffread`](https://github.com/gpertea/gffread) (CDS translation, keyed by
+transcript ID) — you no longer need to supply one. Install gffread first
+(`conda install -c bioconda gffread`, or see the project's release page for a
+static binary). If you already have a peptide FASTA you trust (e.g. a curated
+annotation release), you can still pass it explicitly to skip derivation.
 
 ```python
 import sys; sys.path.insert(0, "pipeline")
@@ -85,13 +91,22 @@ import genostruct
 genostruct.build(
     genome_fa   = "path/to/genome.fa",
     gff3        = "path/to/annotation.gff3",
-    pep_fa      = "path/to/pep.fa",
     pdb_dir     = "path/to/pdbs",
     out_dir     = "viewer",
+    # pep_fa is optional — omit it to derive protein.fa from genome+gff via gffread.
+    # pep_fa    = "path/to/pep.fa",
     # id_regex extracts the transcript id from each PDB filename; the default
     # tries several strategies and falls back to matching known transcript ids.
     id_regex    = r"(.+)_ranked_0",   # example for *_ranked_0.pdb
 )
+```
+
+Or from the CLI:
+
+```bash
+python pipeline/genostruct.py \
+  --genome path/to/genome.fa --gff path/to/annotation.gff3 \
+  --pdb-dir path/to/pdbs --out viewer
 ```
 
 This writes `viewer/data/<transcript>.json`, `viewer/data/index.json`, and copies
@@ -110,6 +125,39 @@ python pipeline/build_viewer.py \
 
 (`molstar.js`, `molstar.css`, `pako_inflate.min.js` are bundled here; they are the
 only third-party assets and are embedded into the output.)
+
+---
+
+## Web app (upload your own data, no local setup)
+
+`app.py` is a [Shiny for Python](https://shiny.posit.co/py/) app that wraps the
+pipeline end to end: upload a genome FASTA, a GFF3, and a folder of PDB models,
+click **Build viewer**, and the app runs `genostruct.build()` (deriving
+protein.fa via gffread) + `build_viewer.build_html()` server-side, then renders
+the resulting self-contained viewer inline (with a download button for the
+generated HTML).
+
+Run locally:
+
+```bash
+pip install -r requirements.txt
+shiny run app.py
+```
+
+Deploy to [shinyapps.io](https://www.shinyapps.io/):
+
+```bash
+pip install rsconnect-python
+rsconnect deploy shiny . --name <account> --title genostruct-viewer
+```
+
+**Note:** the deploy target needs `gffread` on its `PATH` (it's a system
+binary, not a Python package). shinyapps.io environments don't allow arbitrary
+system package installs, so either bundle a static `gffread` binary in the repo
+and point `derive_pep_fasta(..., gffread_bin=...)` at it, or deploy to an
+environment where you control the system packages (e.g. Posit Connect,
+Docker). If `gffread` isn't found, the app surfaces a clear error rather than
+failing silently.
 
 ---
 
