@@ -3,9 +3,10 @@ app.py — Shiny for Python app for genostruct.
 
 User uploads a genome FASTA, a GFF3 annotation, and a folder of PDB structure
 models (multi-file upload). The protein FASTA is derived automatically from
-the genome + GFF3 via gffread (see pipeline/genostruct.py::derive_pep_fasta).
-The pipeline then runs server-side and the resulting self-contained viewer
-HTML is rendered inline (with a download button as a convenience).
+the genome + GFF3 (see pipeline/genostruct.py::derive_pep_fasta) — pure
+Python, no external tools. The pipeline then runs server-side and the
+resulting self-contained viewer HTML is rendered inline (with a download
+button as a convenience).
 
 Run locally:
     shiny run app.py
@@ -52,7 +53,7 @@ app_ui = ui.page_fluid(
     ui.p(
         "Upload a genome FASTA, a GFF3 annotation, and a folder of PDB "
         "structure models. The protein FASTA is derived automatically from "
-        "the genome + GFF3 (via gffread) — no need to supply one."
+        "the genome + GFF3 automatically — no need to supply one."
     ),
     ui.layout_sidebar(
         ui.sidebar(
@@ -83,7 +84,7 @@ def build_viewer_html(genome_path, gff_path, pdb_dir, work_dir, id_regex):
         gff3=gff_path,
         pdb_dir=pdb_dir,
         out_dir=out_dir,
-        pep_fa=None,  # derived automatically via gffread
+        pep_fa=None,  # derived automatically (pure Python, no external tools)
         id_regex=id_regex or None,
     )
     html_out = os.path.join(work_dir, "genostruct_viewer.html")

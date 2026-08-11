@@ -2,9 +2,3 @@
 shiny>=1.0
 numpy
 biotite>=1.0
-
-# NOTE: gffread is also required (used to derive protein.fa from genome+GFF3)
-# but it is a system binary, not installable via pip. Install it separately:
-#   conda install -c bioconda gffread
-# or download a static binary from https://github.com/gpertea/gffread
-# and ensure it is on PATH (or pass gffread_bin=<path> to genostruct.build()).
