@@ -254,6 +254,13 @@ function renderSequence() {
   if (!STATE.seqZoom) STATE.seqZoom = 1;
   wrap.style.fontSize = (13 * STATE.seqZoom) + "px";
   wrap.style.letterSpacing = (1 * STATE.seqZoom) + "px";
+  // residues outside the model's resolved range have no 3D coordinates (the
+  // model can be shorter than the full protein — see align_offset in the
+  // pipeline); dim them in the sequence track so it's clear they're absent
+  // from the structure panel above.
+  var off = (rec.model && rec.model.offset) || 0;
+  var modelLen = (rec.model && rec.model.model_length) || 0;
+  var modelStart = off + 1, modelEnd = off + modelLen;
   for (var i = 0; i < seq.length; i++) {
     var span = document.createElement("span");
     span.className = "aa";
@@ -265,6 +272,7 @@ function renderSequence() {
       span.dataset.elem = elems[i];
       span.classList.add("in-elem");
     }
+    if (i + 1 < modelStart || i + 1 > modelEnd) span.classList.add("unmodeled");
     (function (span) {
       span.addEventListener("mouseenter", function () {
         if (STATE._seqDrag && STATE._seqDrag.on) { extendSeqDrag(+span.dataset.res); return; }
@@ -354,7 +362,12 @@ function zoomGenomeToResidues(lo, hi) {
   }
   if (mn === Infinity) return;
   var ext = genomeExtent();
-  var span = mx - mn, pad = Math.max(30, span * 0.4);
+  // Padding is capped, not just floored: a selection whose residues straddle
+  // an intron (adjacent residues can land in different exons) makes mn..mx
+  // span the intron, and an uncapped proportional pad (span*0.4) then blows
+  // up to a huge fraction of that intron too, zooming out far more than the
+  // selection warrants. Capping keeps the context modest regardless of span.
+  var span = mx - mn, pad = Math.max(30, Math.min(150, span * 0.4));
   STATE.gview = { start: Math.max(ext[0], mn - pad), end: Math.min(ext[1], mx + pad) };
   renderGenome();
 }
@@ -404,6 +417,83 @@ function resetCamera() {
   try { STATE.plugin.managers.camera.reset(); } catch (e) { /* harmless */ }
 }
 
+// --- 3D structure click -> highlight the same residue in the sequence and
+//     genome tracks (the reverse direction of the sequence drag-select). ---
+// Mol*'s Loci-construction/inspection APIs (StructureElement, OrderedSet) are
+// not exported by the Viewer UMD bundle (see focusCameraOnModelResidues for
+// the same constraint), so the picked residue is recovered directly from the
+// Loci's plain data shape: elements[0] = {unit, indices}, where `indices` is
+// an OrderedSet<UnitIndex> in one of two runtime shapes: a SortedArray (real
+// array-like; its values ARE the indices) or an Interval — which mol-data
+// packs, for compactness, as TWO Int32 words bit-cast into a single float64
+// "number" (not an object; verified empirically — typeof indices is "number"
+// for a residue-group pick). Interval.start <= Interval.end always holds, so
+// whichever of the two decoded words is smaller is the start, regardless of
+// which byte lane mol-data happened to store it in.
+var _ivBuf = new ArrayBuffer(8);
+var _ivF64 = new Float64Array(_ivBuf);
+var _ivI32 = new Int32Array(_ivBuf);
+function intervalStart(packed) {
+  _ivF64[0] = packed;
+  return Math.min(_ivI32[0], _ivI32[1]);
+}
+function residueIndexFromLoci(loci) {
+  try {
+    if (!loci || !loci.elements || !loci.elements.length) return null;
+    var first = loci.elements[0];
+    var unit = first.unit, idxSet = first.indices;
+    if (!unit || idxSet == null) return null;
+    var uidx;
+    if (typeof idxSet === "number") uidx = intervalStart(idxSet);
+    else if (typeof idxSet.length === "number" && idxSet.length > 0) uidx = idxSet[0];
+    else return null;
+    if (typeof uidx !== "number" || !isFinite(uidx)) return null;
+    var elIndex = (unit.elements && unit.elements[uidx] !== undefined) ? unit.elements[uidx] : uidx;
+    return unit.model.atomicHierarchy.residueAtomSegments.index[elIndex];
+  } catch (e) { return null; }
+}
+// Highlight a single clicked residue that isn't part of any structural
+// element: dim the rest of the 3D structure, mark the residue in the sequence
+// track, and zoom the genome track to the exon that encodes it (not the exact
+// ~3 bp codon — that hid the rest of the gene's exon/element colors — and not
+// a full-locus reset, which loses precision and leaves the view unresponsive
+// to where you actually clicked).
+function focusSingleResidueFrom3D(protRes) {
+  STATE.selected = null; STATE.dimElem = null;
+  STATE.focusRange = { start: protRes, end: protRes };
+  paintSeqSelection();
+  recolor3D();
+  var rec = STATE.rec, codon = rec.residue_genome && rec.residue_genome[protRes - 1];
+  if (codon && codon.length) zoomGenomeToExonAt(codon[0]);
+  else resetGenomeView();
+  var el = document.getElementById("focusInfo");
+  if (el) el.textContent = "Focused protein residue " + protRes + " (click empty area or Reset to clear)";
+}
+function installStructureClickHandler(plugin) {
+  try {
+    if (!plugin || !plugin.behaviors || !plugin.behaviors.interaction || !plugin.behaviors.interaction.click) return;
+    plugin.behaviors.interaction.click.subscribe(function (ev) {
+      var loci = ev && ev.current ? ev.current.loci : null;
+      if (!loci || loci.kind !== "element-loci") return;
+      var rec = STATE.rec;
+      if (!rec) return;
+      var residueIndex = residueIndexFromLoci(loci);
+      if (residueIndex == null) return;
+      var off = (rec.model && rec.model.offset) || 0;
+      var protRes = off + residueIndex + 1;   // 1-based full-protein residue
+      if (protRes < 1 || protRes > rec.protein_length) return;
+      // if the residue belongs to a structural element, reuse the existing
+      // element-focus flow (dims 3D to the element, zooms genome to ITS full
+      // genomic ranges, highlights its sequence span) — the same behavior as
+      // clicking that element's legend chip, sequence block, or genome
+      // feature, so a 3D click and those give identical, well-tested results.
+      var elemId = rec.residue_element && rec.residue_element[residueIndex + off];
+      if (elemId) selectElement(elemId);
+      else focusSingleResidueFrom3D(protRes);
+    });
+  } catch (e) { /* best-effort: click-to-highlight is an enhancement, never fatal */ }
+}
+
 /* =====================================================================
    GENOME PANEL (SVG)
    ===================================================================== */
@@ -425,10 +515,27 @@ function zoomGenomeToElement(elemId) {
   var lo = Infinity, hi = -Infinity;
   el.genome_ranges.forEach(function (gr) { if (gr[0] < lo) lo = gr[0]; if (gr[1] > hi) hi = gr[1]; });
   var ext = genomeExtent();
-  var span = hi - lo, pad = Math.max(30, span * 0.5);   // at least 30 bp of context
+  // capped, not just floored — an element split across exons (lo..hi spans
+  // the intervening intron) would otherwise blow the padding up in proportion
+  // to that intron and zoom out far more than the element itself warrants.
+  var span = hi - lo, pad = Math.max(30, Math.min(150, span * 0.5));
   var s = Math.max(ext[0], lo - pad), e = Math.min(ext[1], hi + pad);
   if (e - s < 12) { var mid = (s + e) / 2; s = Math.max(ext[0], mid - 6); e = Math.min(ext[1], mid + 6); }
   STATE.gview = { start: s, end: e };
+  renderGenome();
+}
+// Zoom the genome track to the exon containing a given genomic position, with
+// padding — used for a coil residue (no structural element to zoom to), so
+// the view still moves to the RIGHT place instead of a tiny few-bp window
+// (loses exon-color context) or a full-locus reset (loses precision).
+function zoomGenomeToExonAt(gPos) {
+  var rec = STATE.rec, ext = genomeExtent();
+  var exon = rec.exons.filter(function (e) { return gPos >= e[0] && gPos <= e[1]; })[0];
+  if (!exon) { resetGenomeView(); return; }
+  var lo = exon[0], hi = exon[1];
+  var span = hi - lo, pad = Math.max(40, Math.min(150, span * 0.4));
+  var s = Math.max(ext[0], lo - pad), e2 = Math.min(ext[1], hi + pad);
+  STATE.gview = { start: s, end: e2 };
   renderGenome();
 }
 function renderGenome() {
@@ -870,6 +977,7 @@ async function init() {
     ],
   });
   STATE.plugin = viewer.plugin ? viewer.plugin : viewer;
+  installStructureClickHandler(STATE.plugin);
   document.getElementById("exportBtn").addEventListener("click", exportGenBankUI);
   var evb = document.getElementById("exportViewBtn");
   if (evb) evb.addEventListener("click", exportViewedRegionUI);
