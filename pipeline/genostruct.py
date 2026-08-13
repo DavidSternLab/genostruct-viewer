@@ -15,7 +15,8 @@ produces, for every transcript that has a structure model:
     * per-element genomic base ranges (split across exons where needed)
 
 Nothing about the organism, file names, or gene IDs is hardcoded.
-The PDB<->transcript mapping is auto-detected (see map_pdbs_to_transcripts).
+The PDB<->transcript mapping is auto-detected by SEQUENCE, not filename (see
+map_pdbs_to_transcripts / best_matching_transcript).
 
 Outputs one compact JSON per transcript plus an index.json, suitable for the
 self-contained HTML viewer, and supports GenBank export of any genomic region.
@@ -220,44 +221,142 @@ def pdb_sequence(path: str):
             bfac.append(float(line[60:66]) if line[12:16].strip() == "CA" else 0.0)
     return "".join(seq), resids, bfac
 
+def _read_model_sequence(path: str) -> str:
+    """One-letter model sequence (first chain, first model) from a PDB or mmCIF
+    structure file. PDB uses the lightweight zero-dependency parser above;
+    mmCIF uses biotite (already a hard pipeline dependency elsewhere)."""
+    if path.lower().endswith(".cif"):
+        import biotite.structure as struc
+        from biotite.structure.io.pdbx import CIFFile, get_structure
+        arr = get_structure(CIFFile.read(path), model=1)
+        chains = np.unique(arr.chain_id)
+        arr = arr[arr.chain_id == chains[0]]
+        _, res_names = struc.get_residues(arr)
+        return "".join(THREE2ONE.get(r, 'X') for r in res_names)
+    seq, _, _ = pdb_sequence(path)
+    return seq
+
 # ----------------------------------------------------------------------------
 # PDB <-> transcript auto-mapping
 # ----------------------------------------------------------------------------
-def map_pdbs_to_transcripts(pdb_dir: str, transcript_ids, pep: dict,
-                            id_regex: str | None = None):
+def best_matching_transcript(model_seq: str, candidates, min_identity: float = 0.6,
+                             max_local_align: int = 6):
     """
-    Auto-detect which transcript each PDB corresponds to, generically.
+    Find which (tid, full_seq) candidate the model's own sequence matches,
+    cascading from cheap to expensive so this scales to genomes with many
+    thousands of genes:
+      1. exact substring (resolves the vast majority of real models)
+      2. gapless best-offset scan, ranked across ALL candidates
+      3. gapped local alignment (Biopython), but only on the `max_local_align`
+         candidates the gapless pass ranked closest — running full local
+         alignment against every candidate would be far too slow at scale.
 
-    Strategy (in order):
-      1. If id_regex given, use its first capture group as the transcript id.
-      2. Try to find any known transcript id as a substring of the file stem
-         (longest match wins) — robust to prefixes/suffixes like
-         'Species_<tid>_ranked_0.pdb'.
-      3. Fall back to the file stem itself.
+    Returns (tid, method, identity), or (None, "none", best_identity_seen) if
+    nothing clears `min_identity`.
+    """
+    m = len(model_seq)
+    if m == 0 or not candidates:
+        return None, "none", -1.0
+    # length pre-filter: a real match can't be drastically shorter than the
+    # model, and won't usually be more than ~2.5x longer (signal peptide
+    # trimming, propeptide processing, etc.).
+    lo, hi = m * 0.5, m * 2.5 + 30
+    pool = [(tid, s) for tid, s in candidates if lo <= len(s.rstrip('*')) <= hi] or list(candidates)
 
-    Returns {tid: pdb_path} for those that resolve to a known transcript.
+    # pass 1: exact substring
+    hits = [tid for tid, s in pool if model_seq in s.rstrip('*')]
+    if hits:
+        # ambiguous exact match (e.g. near-duplicate genes) — the shortest
+        # protein containing it is the most specific match
+        pep_map = dict(pool)
+        hits.sort(key=lambda tid: len(pep_map[tid]))
+        return hits[0], "substring", 1.0
+
+    # pass 2: gapless best-offset scan, ranked across all candidates. A
+    # candidate protein SHORTER than the model happens for real data (e.g.
+    # the annotation was updated to a shorter isoform after the AF2 model was
+    # predicted) — slide the shorter side across the longer instead of
+    # skipping it outright, so it still gets a comparable score and a shot at
+    # the pass-3 local-alignment fallback below (skipping it here would drop
+    # it from `scored` entirely, making it invisible to pass 3 too).
+    scored = []
+    for tid, s in pool:
+        full = s.rstrip('*')
+        if len(full) >= m:
+            window_src, window_len, fixed = full, m, model_seq
+        else:
+            window_src, window_len, fixed = model_seq, len(full), full
+        best_score = -1
+        for off in range(0, len(window_src) - window_len + 1):
+            score = sum(1 for a, b in zip(fixed, window_src[off:off + window_len]) if a == b)
+            if score > best_score:
+                best_score = score
+        scored.append((best_score / m, tid))
+    scored.sort(key=lambda x: -x[0])
+    if scored and scored[0][0] >= min_identity:
+        return scored[0][1], "gapless", scored[0][0]
+
+    # pass 3: gapped local alignment, only on the handful of candidates the
+    # cheap passes ranked closest
+    pep_map = dict(pool)
+    best_local = (None, "none", -1.0)
+    for _, tid in scored[:max_local_align]:
+        off, ident = _local_align_offset(model_seq, pep_map[tid].rstrip('*'))
+        if off is not None and ident > best_local[2]:
+            best_local = (tid, "local", ident)
+    if best_local[2] >= min_identity:
+        return best_local
+    return None, "none", max(best_local[2], scored[0][0] if scored else -1.0)
+
+def map_pdbs_to_transcripts(pdb_dir: str, transcript_ids, pep: dict,
+                            id_regex: str | None = None, min_identity: float = 0.6,
+                            verbose: bool = False):
+    """
+    Auto-detect which transcript each PDB/mmCIF corresponds to.
+
+    Default strategy is sequence-based (see best_matching_transcript): each
+    structure's own residue sequence is searched against the candidate
+    transcripts' peptide sequences. Protein/gene names frequently don't
+    correspond to the transcript/gene IDs in a GFF3 (stale IDs, database
+    cross-references, arbitrary AlphaFold job names, ...), so matching by
+    filename is unreliable; matching by sequence is not.
+
+    If `id_regex` is given, filenames are used instead (a faster opt-in path
+    for when filenames are already known to reliably encode the transcript
+    id) — its first capture group is taken directly as the transcript id.
+
+    Returns ({tid: pdb_path}, [unresolved pdb basenames]).
     """
     pdbs = sorted(glob.glob(os.path.join(pdb_dir, "*.pdb"))) + \
            sorted(glob.glob(os.path.join(pdb_dir, "*.cif")))
     tid_set = set(transcript_ids)
-    # sort ids by length desc for greedy longest-substring matching
-    ids_by_len = sorted(tid_set, key=len, reverse=True)
     mapping = {}
     unresolved = []
-    for p in pdbs:
-        stem = os.path.splitext(os.path.basename(p))[0]
-        tid = None
-        if id_regex:
+
+    if id_regex:
+        for p in pdbs:
+            stem = os.path.splitext(os.path.basename(p))[0]
             m = re.search(id_regex, stem)
-            if m: tid = m.group(1)
-        if tid is None or tid not in tid_set:
-            # greedy substring search
-            for cand in ids_by_len:
-                if cand in stem:
-                    tid = cand; break
-        if tid is None or tid not in tid_set:
+            tid = m.group(1) if m else None
+            if tid is None or tid not in tid_set:
+                unresolved.append(os.path.basename(p)); continue
+            mapping.setdefault(tid, p)
+        return mapping, unresolved
+
+    candidates = [(tid, pep[tid]) for tid in tid_set]
+    for p in pdbs:
+        try:
+            model_seq = _read_model_sequence(p)
+        except Exception:
             unresolved.append(os.path.basename(p)); continue
-        # keep first (or prefer one whose pep matches better later)
+        if not model_seq:
+            unresolved.append(os.path.basename(p)); continue
+        tid, method, ident = best_matching_transcript(model_seq, candidates, min_identity=min_identity)
+        if tid is None:
+            unresolved.append(os.path.basename(p)); continue
+        if verbose and tid in mapping:
+            print(f"  note: {os.path.basename(p)} also matched {tid} ({method}, ident={ident:.2f}); "
+                  f"keeping first match {os.path.basename(mapping[tid])}")
         mapping.setdefault(tid, p)
     return mapping, unresolved
 
@@ -571,7 +670,7 @@ def build(genome_fa, gff3, pdb_dir, out_dir, pep_fa=None,
     if verbose: print("Mapping PDBs to transcripts ...")
     # only transcripts that have both CDS and a peptide are usable
     usable_ids = [tid for tid, t in tx.items() if t.cds and tid in pep]
-    mapping, unresolved = map_pdbs_to_transcripts(pdb_dir, usable_ids, pep, id_regex)
+    mapping, unresolved = map_pdbs_to_transcripts(pdb_dir, usable_ids, pep, id_regex, verbose=verbose)
     if verbose:
         print(f"  {len(mapping)} PDBs mapped, {len(unresolved)} unresolved")
 
@@ -618,7 +717,9 @@ if __name__ == "__main__":
     ap.add_argument("--pdb-dir", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--id-regex", default=None,
-                    help="regex whose group(1) extracts the transcript id from a PDB filename stem")
+                    help="opt-in fast path: regex whose group(1) extracts the transcript id from a "
+                         "PDB filename stem, skipping sequence search. Default (omitted) matches each "
+                         "PDB to a transcript by sequence, not filename.")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
     build(args.genome, args.gff, args.pdb_dir, args.out, pep_fa=args.pep,

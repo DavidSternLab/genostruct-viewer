@@ -95,9 +95,13 @@ genostruct.build(
     out_dir     = "viewer",
     # pep_fa is optional — omit it to derive protein.fa from genome+gff automatically.
     # pep_fa    = "path/to/pep.fa",
-    # id_regex extracts the transcript id from each PDB filename; the default
-    # tries several strategies and falls back to matching known transcript ids.
-    id_regex    = r"(.+)_ranked_0",   # example for *_ranked_0.pdb
+    # id_regex is optional. By default, each PDB is matched to a transcript by
+    # SEQUENCE (searching the model's own residues against every candidate
+    # protein), not by filename — protein/gene names in a PDB filename
+    # frequently don't correspond to the transcript/gene IDs in a GFF3. Only
+    # set id_regex if you already know filenames reliably encode the
+    # transcript id and want to skip sequence search for speed:
+    # id_regex  = r"(.+)_ranked_0",   # example for *_ranked_0.pdb
 )
 ```
 

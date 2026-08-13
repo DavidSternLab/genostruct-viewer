@@ -6,6 +6,8 @@ pdbs/
 *.fa
 *.fasta
 *.gff3
+*.fai
+Apisum_data/
 
 # Python
 __pycache__/
