@@ -60,7 +60,29 @@ app_ui = ui.page_fluid(
             ui.input_file("genome_fa", "Genome FASTA (.fa/.fasta)", accept=[".fa", ".fasta", ".fna"]),
             ui.input_file("gff", "GFF3 annotation (.gff/.gff3)", accept=[".gff", ".gff3"]),
             ui.input_file("pdb_files", "PDB structures folder", multiple=True),
-            ui.input_text("id_regex", "Transcript-ID regex (optional)", placeholder=r"e.g. (.+)_ranked_0"),
+            ui.input_radio_buttons(
+                "match_mode", "Match PDBs to transcripts by",
+                {
+                    "sequence": "Sequence (recommended) — searches each model's own "
+                                "residues against every candidate protein; slower but "
+                                "doesn't depend on filenames meaning anything",
+                    "filename": "Filename — fast, but only works if filenames reliably "
+                                 "encode the transcript id",
+                },
+                selected="sequence",
+            ),
+            ui.panel_conditional(
+                "input.match_mode === 'filename'",
+                ui.input_text(
+                    "id_regex", "Transcript-ID regex",
+                    placeholder=r"e.g. (.+)_ranked_0",
+                ),
+                ui.p(
+                    "Regex whose first capture group extracts the transcript id from "
+                    "each PDB filename (without extension).",
+                    class_="text-muted", style="font-size:0.85em;",
+                ),
+            ),
             ui.input_action_button("run", "Build viewer", class_="btn-primary"),
             ui.download_button("download", "Download viewer HTML"),
             width=350,
@@ -121,6 +143,16 @@ def server(input, output, session):
             )
             return
 
+        id_regex = None
+        if input.match_mode() == "filename":
+            id_regex = (input.id_regex() or "").strip()
+            if not id_regex:
+                error_msg.set(
+                    "Filename matching is selected but no transcript-ID regex was "
+                    "given. Enter one, or switch to sequence matching."
+                )
+                return
+
         work_dir = tempfile.mkdtemp(prefix="genostruct_")
         try:
             pdb_dir = os.path.join(work_dir, "pdbs")
@@ -135,7 +167,7 @@ def server(input, output, session):
                 gff_file[0]["datapath"],
                 pdb_dir,
                 work_dir,
-                input.id_regex(),
+                id_regex,
             )
             result_html.set(html_out)
         except Exception as ex:
